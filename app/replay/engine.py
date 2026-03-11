@@ -21,9 +21,10 @@ class ReplayEngine:
         timeframe: Timeframe,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        force: bool = False,
     ) -> int:
-        """Download data if not cached; return total bar count."""
-        if not self._cache.has_data(symbol, timeframe):
+        """Download data if not cached (or force); return total bar count."""
+        if force or not self._cache.has_data(symbol, timeframe):
             candles = self._provider.fetch_candles(symbol, timeframe, start_date, end_date)
             if candles:
                 self._cache.save_candles(symbol, timeframe, candles)

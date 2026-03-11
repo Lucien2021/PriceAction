@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QTextEdit, QGroupBox,
     QTabWidget, QAbstractItemView, QLineEdit,
     QDialog, QDialogButtonBox, QMessageBox,
+    QGridLayout, QScrollArea,
 )
 
 from app.storage.stats_service import StatsService, AggregateStats
@@ -51,12 +52,14 @@ class ReviewPanel(QWidget):
     def _build_overview_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+        layout.setSpacing(8)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("品种:"))
         self._filter_symbol = QComboBox()
         self._filter_symbol.addItem("全部", "")
-        self._filter_symbol.setMinimumWidth(100)
+        self._filter_symbol.setMinimumWidth(80)
         filter_row.addWidget(self._filter_symbol)
         filter_row.addWidget(QLabel("周期:"))
         self._filter_tf = QComboBox()
@@ -67,14 +70,13 @@ class ReviewPanel(QWidget):
         btn_refresh = QPushButton("刷新")
         btn_refresh.clicked.connect(self.refresh)
         filter_row.addWidget(btn_refresh)
-        filter_row.addStretch()
         layout.addLayout(filter_row)
 
         self._stats_group = QGroupBox("核心指标")
         sg = QVBoxLayout(self._stats_group)
         self._lbl_summary = QLabel("暂无数据")
         self._lbl_summary.setWordWrap(True)
-        self._lbl_summary.setStyleSheet("font-size: 13px;")
+        self._lbl_summary.setMinimumHeight(120)
         sg.addWidget(self._lbl_summary)
         layout.addWidget(self._stats_group)
 
@@ -82,7 +84,7 @@ class ReviewPanel(QWidget):
         eg = QVBoxLayout(self._extra_group)
         self._lbl_extra = QLabel("")
         self._lbl_extra.setWordWrap(True)
-        self._lbl_extra.setStyleSheet("font-size: 12px;")
+        self._lbl_extra.setMinimumHeight(60)
         eg.addWidget(self._lbl_extra)
         layout.addWidget(self._extra_group)
 
@@ -109,18 +111,19 @@ class ReviewPanel(QWidget):
         self._trade_table.currentCellChanged.connect(self._on_trade_selected)
         layout.addWidget(self._trade_table)
 
-        # Tag buttons
+        # Tag buttons (grid layout, 4 per row)
         tag_group = QGroupBox("快速标签 (选中交易后点击)")
-        tg = QHBoxLayout(tag_group)
+        tg = QGridLayout(tag_group)
         tg.setContentsMargins(4, 4, 4, 4)
+        tg.setSpacing(4)
         self._tag_buttons: list[QPushButton] = []
-        for tag in PA_TAGS[:8]:
+        for i, tag in enumerate(PA_TAGS[:8]):
             btn = QPushButton(tag)
             btn.setCheckable(True)
-            btn.setMaximumHeight(26)
-            btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+            btn.setMinimumHeight(26)
+            btn.setStyleSheet("font-size: 10px; padding: 2px 4px;")
             btn.clicked.connect(lambda checked, t=tag: self._on_tag_toggle(t, checked))
-            tg.addWidget(btn)
+            tg.addWidget(btn, i // 4, i % 4)
             self._tag_buttons.append(btn)
         layout.addWidget(tag_group)
 

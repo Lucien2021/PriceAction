@@ -14,83 +14,110 @@
   .up { color: #ef5350; }
   .down { color: #26a69a; }
 </style>
-<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 <body>
 <div id="info-overlay"></div>
 <div id="chart"></div>
+<script src="lightweight-charts.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
-let chart, candleSeries, volumeSeries, bridge;
+var chart = null;
+var candleSeries = null;
+var volumeSeries = null;
+var bridge = null;
+var _ready = false;
 
-chart = LightweightCharts.createChart(document.getElementById('chart'), {
-    layout: { background: { type: 'solid', color: '#1e222d' }, textColor: '#d1d4dc' },
-    grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    rightPriceScale: { borderColor: '#2B2B43' },
-    timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false },
-    width: window.innerWidth,
-    height: window.innerHeight,
-});
+function initChart() {
+    try {
+        chart = LightweightCharts.createChart(document.getElementById('chart'), {
+            layout: { background: { type: 'solid', color: '#1e222d' }, textColor: '#d1d4dc' },
+            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: '#2B2B43' },
+            timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false },
+            width: window.innerWidth,
+            height: window.innerHeight,
+        });
 
-candleSeries = chart.addCandlestickSeries({
-    upColor: '#ef5350',
-    downColor: '#26a69a',
-    borderUpColor: '#ef5350',
-    borderDownColor: '#26a69a',
-    wickUpColor: '#ef5350',
-    wickDownColor: '#26a69a',
-});
+        candleSeries = chart.addCandlestickSeries({
+            upColor: '#ef5350',
+            downColor: '#26a69a',
+            borderUpColor: '#ef5350',
+            borderDownColor: '#26a69a',
+            wickUpColor: '#ef5350',
+            wickDownColor: '#26a69a',
+        });
 
-volumeSeries = chart.addHistogramSeries({
-    priceFormat: { type: 'volume' },
-    priceScaleId: 'volume',
-});
-chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+        volumeSeries = chart.addHistogramSeries({
+            priceFormat: { type: 'volume' },
+            priceScaleId: 'volume',
+        });
+        chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
-// Crosshair data display
-chart.subscribeCrosshairMove(function(param) {
-    const overlay = document.getElementById('info-overlay');
-    if (!param || !param.time) { overlay.innerHTML = ''; return; }
-    const d = param.seriesData.get(candleSeries);
-    if (!d) { overlay.innerHTML = ''; return; }
-    const cls = d.close >= d.open ? 'up' : 'down';
-    overlay.innerHTML =
-        '<span>O: <b class="'+cls+'">'+d.open.toFixed(2)+'</b></span>' +
-        '<span>H: <b class="'+cls+'">'+d.high.toFixed(2)+'</b></span>' +
-        '<span>L: <b class="'+cls+'">'+d.low.toFixed(2)+'</b></span>' +
-        '<span>C: <b class="'+cls+'">'+d.close.toFixed(2)+'</b></span>';
-});
+        chart.subscribeCrosshairMove(function(param) {
+            var overlay = document.getElementById('info-overlay');
+            if (!param || !param.time) { overlay.innerHTML = ''; return; }
+            var d = param.seriesData.get(candleSeries);
+            if (!d) { overlay.innerHTML = ''; return; }
+            var cls = d.close >= d.open ? 'up' : 'down';
+            overlay.innerHTML =
+                '<span>O: <b class="'+cls+'">'+d.open.toFixed(2)+'</b></span>' +
+                '<span>H: <b class="'+cls+'">'+d.high.toFixed(2)+'</b></span>' +
+                '<span>L: <b class="'+cls+'">'+d.low.toFixed(2)+'</b></span>' +
+                '<span>C: <b class="'+cls+'">'+d.close.toFixed(2)+'</b></span>';
+        });
+
+        _ready = true;
+        console.log('Chart initialized OK');
+    } catch(e) {
+        console.error('Chart init failed:', e);
+        document.getElementById('chart').innerText = 'Chart init error: ' + e.message;
+    }
+}
+
+initChart();
 
 new QWebChannel(qt.webChannelTransport, function(channel) {
     bridge = channel.objects.bridge;
     if (bridge) bridge.chartReady();
 });
 
-/* ---------- API called from Python ---------- */
+/* -------- API called from Python via runJavaScript -------- */
 
-function setData(candlesJson, volumesJson) {
-    candleSeries.setData(JSON.parse(candlesJson));
-    volumeSeries.setData(JSON.parse(volumesJson));
-    chart.timeScale().fitContent();
+window._pendingData = null;
+
+function setData(candles, volumes) {
+    if (!candleSeries) { console.error('candleSeries not ready'); return; }
+    try {
+        candleSeries.setData(candles);
+        volumeSeries.setData(volumes);
+        chart.timeScale().fitContent();
+    } catch(e) { console.error('setData error:', e); }
 }
 
-function addCandle(candleJson, volumeJson) {
-    candleSeries.update(JSON.parse(candleJson));
-    volumeSeries.update(JSON.parse(volumeJson));
-    chart.timeScale().scrollToRealTime();
+function addCandle(candle, volume) {
+    if (!candleSeries) return;
+    try {
+        candleSeries.update(candle);
+        volumeSeries.update(volume);
+        chart.timeScale().scrollToRealTime();
+    } catch(e) { console.error('addCandle error:', e); }
 }
 
-function setMarkers(markersJson) {
-    candleSeries.setMarkers(JSON.parse(markersJson));
+function setMarkers(markers) {
+    if (!candleSeries) return;
+    try {
+        candleSeries.setMarkers(markers);
+    } catch(e) { console.error('setMarkers error:', e); }
 }
 
 function clearChart() {
-    candleSeries.setData([]);
-    volumeSeries.setData([]);
+    if (candleSeries) candleSeries.setData([]);
+    if (volumeSeries) volumeSeries.setData([]);
 }
 
 function drawHorizontalLine(price, color, lineWidth, lineStyle) {
+    if (!candleSeries) return;
     return candleSeries.createPriceLine({
         price: price,
         color: color || '#FFD700',
@@ -100,15 +127,11 @@ function drawHorizontalLine(price, color, lineWidth, lineStyle) {
     });
 }
 
-function removeAllPriceLines() {
-    /* lightweight-charts v4 does not expose a list, so we re-create the series */
-}
-
-function fitContent() { chart.timeScale().fitContent(); }
-function scrollToRight() { chart.timeScale().scrollToRealTime(); }
+function fitContent() { if (chart) chart.timeScale().fitContent(); }
+function scrollToRight() { if (chart) chart.timeScale().scrollToRealTime(); }
 
 window.addEventListener('resize', function() {
-    chart.applyOptions({ width: window.innerWidth, height: window.innerHeight });
+    if (chart) chart.applyOptions({ width: window.innerWidth, height: window.innerHeight });
 });
 </script>
 </body>

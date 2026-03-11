@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QSplitter, QLabel, QPushButton, QComboBox, QLineEdit,
     QSpinBox, QDoubleSpinBox, QGroupBox, QRadioButton,
     QButtonGroup, QStatusBar, QMenuBar, QMessageBox,
-    QTabWidget, QSlider,
+    QTabWidget, QSlider, QScrollArea,
 )
 
 from app.domain.candle import (
@@ -78,16 +78,23 @@ class MainWindow(QMainWindow):
 
         # Right panel tabs
         right_tabs = QTabWidget()
-        right_tabs.setMaximumWidth(380)
-        right_tabs.setMinimumWidth(300)
+        right_tabs.setMinimumWidth(340)
 
-        # Training control tab
+        # Training control tab (wrapped in scroll area)
         training_widget = self._build_training_panel()
-        right_tabs.addTab(training_widget, "训练")
+        training_scroll = QScrollArea()
+        training_scroll.setWidget(training_widget)
+        training_scroll.setWidgetResizable(True)
+        training_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_tabs.addTab(training_scroll, "训练")
 
-        # Review tab
+        # Review tab (wrapped in scroll area)
         self._review_panel = ReviewPanel(self._stats_service)
-        right_tabs.addTab(self._review_panel, "复盘")
+        review_scroll = QScrollArea()
+        review_scroll.setWidget(self._review_panel)
+        review_scroll.setWidgetResizable(True)
+        review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_tabs.addTab(review_scroll, "复盘")
 
         splitter.addWidget(right_tabs)
         splitter.setStretchFactor(0, 3)
@@ -150,6 +157,8 @@ class MainWindow(QMainWindow):
     def _build_training_panel(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+        layout.setSpacing(8)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         # Mode selection
         mode_group = QGroupBox("训练模式")
@@ -167,6 +176,7 @@ class MainWindow(QMainWindow):
         # --- Trade controls ---
         self._trade_box = QGroupBox("交易操作")
         tb = QVBoxLayout(self._trade_box)
+        tb.setSpacing(6)
 
         qty_row = QHBoxLayout()
         qty_row.addWidget(QLabel("数量:"))
@@ -184,21 +194,27 @@ class MainWindow(QMainWindow):
         self._spn_sl.setDecimals(2)
         self._spn_sl.setSpecialValueText("无")
         sl_row.addWidget(self._spn_sl)
-        sl_row.addWidget(QLabel("止盈:"))
+        tb.addLayout(sl_row)
+
+        tp_row = QHBoxLayout()
+        tp_row.addWidget(QLabel("止盈:"))
         self._spn_tp = QDoubleSpinBox()
         self._spn_tp.setRange(0, 99999)
         self._spn_tp.setDecimals(2)
         self._spn_tp.setSpecialValueText("无")
-        sl_row.addWidget(self._spn_tp)
-        tb.addLayout(sl_row)
+        tp_row.addWidget(self._spn_tp)
+        tb.addLayout(tp_row)
 
         btn_row = QHBoxLayout()
         self._btn_buy = QPushButton("做多")
+        self._btn_buy.setMinimumHeight(32)
         self._btn_buy.setStyleSheet("background:#ef5350; color:white; font-weight:bold;")
         self._btn_sell = QPushButton("做空")
+        self._btn_sell.setMinimumHeight(32)
         self._btn_sell.setStyleSheet("background:#26a69a; color:white; font-weight:bold;")
         self._btn_sell.setEnabled(False)
         self._btn_close = QPushButton("平仓")
+        self._btn_close.setMinimumHeight(32)
         btn_row.addWidget(self._btn_buy)
         btn_row.addWidget(self._btn_sell)
         btn_row.addWidget(self._btn_close)
@@ -206,18 +222,24 @@ class MainWindow(QMainWindow):
 
         self._lbl_trade_info = QLabel("无持仓")
         self._lbl_trade_info.setWordWrap(True)
+        self._lbl_trade_info.setMinimumHeight(50)
         tb.addWidget(self._lbl_trade_info)
         layout.addWidget(self._trade_box)
 
         # --- Predict controls ---
         self._predict_box = QGroupBox("方向预测")
         pb = QVBoxLayout(self._predict_box)
+        pb.setSpacing(6)
+
         pred_row = QHBoxLayout()
-        self._btn_up = QPushButton("看涨 ▲")
-        self._btn_up.setStyleSheet("background:#ef5350; color:white;")
-        self._btn_down = QPushButton("看跌 ▼")
-        self._btn_down.setStyleSheet("background:#26a69a; color:white;")
-        self._btn_side = QPushButton("震荡 ◆")
+        self._btn_up = QPushButton("看涨")
+        self._btn_up.setMinimumHeight(32)
+        self._btn_up.setStyleSheet("background:#ef5350; color:white; font-weight:bold;")
+        self._btn_down = QPushButton("看跌")
+        self._btn_down.setMinimumHeight(32)
+        self._btn_down.setStyleSheet("background:#26a69a; color:white; font-weight:bold;")
+        self._btn_side = QPushButton("震荡")
+        self._btn_side.setMinimumHeight(32)
         pred_row.addWidget(self._btn_up)
         pred_row.addWidget(self._btn_down)
         pred_row.addWidget(self._btn_side)
@@ -234,6 +256,7 @@ class MainWindow(QMainWindow):
 
         self._lbl_predict_info = QLabel("暂无预测")
         self._lbl_predict_info.setWordWrap(True)
+        self._lbl_predict_info.setMinimumHeight(40)
         pb.addWidget(self._lbl_predict_info)
         self._predict_box.setVisible(False)
         layout.addWidget(self._predict_box)
@@ -241,14 +264,15 @@ class MainWindow(QMainWindow):
         # --- Live stats ---
         stats_group = QGroupBox("本轮统计")
         sg = QVBoxLayout(stats_group)
-        self._lbl_live_stats = QLabel("—")
+        self._lbl_live_stats = QLabel("--")
         self._lbl_live_stats.setWordWrap(True)
-        self._lbl_live_stats.setStyleSheet("font-size: 12px;")
+        self._lbl_live_stats.setMinimumHeight(60)
         sg.addWidget(self._lbl_live_stats)
         layout.addWidget(stats_group)
 
         # --- End session ---
         self._btn_finish = QPushButton("结束训练并保存")
+        self._btn_finish.setMinimumHeight(34)
         layout.addWidget(self._btn_finish)
 
         layout.addStretch()
@@ -320,13 +344,18 @@ class MainWindow(QMainWindow):
             return
         tf: Timeframe = self._cmb_tf.currentData()
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
-        self._lbl_status.setText(f"正在下载 {code} {tf.label} …")
+        self._lbl_status.setText(f"正在下载 {code} {tf.label} (可能需要几秒)...")
+        self._btn_download.setEnabled(False)
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
         try:
-            count = self._engine.ensure_data(symbol, tf)
+            count = self._engine.ensure_data(symbol, tf, force=True)
             self._lbl_status.setText(f"下载完成: {code} {tf.label} 共 {count} 根K线")
         except Exception as e:
             QMessageBox.warning(self, "下载失败", str(e))
             self._lbl_status.setText("下载失败")
+        finally:
+            self._btn_download.setEnabled(True)
 
     def _on_start_session(self):
         code = self._inp_symbol.text().strip()
