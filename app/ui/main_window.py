@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -8,17 +9,18 @@ from PySide6.QtWidgets import (
     QSplitter, QLabel, QPushButton, QComboBox, QLineEdit,
     QSpinBox, QDoubleSpinBox, QGroupBox, QRadioButton,
     QButtonGroup, QStatusBar, QMenuBar, QMessageBox,
-    QTabWidget, QSlider, QScrollArea,
+    QTabWidget, QSlider, QScrollArea, QTableWidget,
+    QTableWidgetItem, QHeaderView, QApplication,
 )
 
 from app.domain.candle import (
-    Symbol, Timeframe, MarketType,
+    Candle, Symbol, Timeframe, MarketType,
     TradeDirection, PredictionDirection,
 )
 from app.domain.market_rules import AShareRules
 from app.data.providers.akshare_provider import AKShareProvider
 from app.data.cache.repository import CacheRepository
-from app.replay.engine import ReplayEngine
+from app.replay.engine import ReplayEngine, TRAINING_TFS
 from app.replay.session import ReplaySession, SessionState, TrainingMode
 from app.training.predict_mode import PredictMode
 from app.training.trade_mode import TradeMode
@@ -34,7 +36,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Price Action 训练器")
         self.setMinimumSize(1200, 750)
 
-        # services
         self._cache = CacheRepository()
         self._provider = AKShareProvider()
         self._engine = ReplayEngine(self._cache, self._provider)
@@ -42,12 +43,17 @@ class MainWindow(QMainWindow):
         self._db_conn = get_connection()
         self._stats_service = StatsService(self._db_conn)
 
-        # session state
         self._session = ReplaySession()
         self._predict_mode: Optional[PredictMode] = None
         self._trade_mode: Optional[TradeMode] = None
+        self._pending_limit: Optional[dict] = None
 
-        # auto-play timer
+        # Multi-TF state
+        self._tf_candles: Dict[Timeframe, List[Candle]] = {}
+        self._active_tf: Timeframe = Timeframe.DAILY
+        self._time_cursor: Optional[datetime] = None
+        self._training_symbol: Optional[Symbol] = None
+
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_auto_advance)
 
@@ -56,7 +62,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
     # ==================================================================
-    # UI construction
+    # UI
     # ==================================================================
 
     def _build_ui(self):
@@ -65,22 +71,15 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(4, 4, 4, 4)
 
-        # --- Toolbar ---
-        toolbar = self._build_toolbar()
-        root.addLayout(toolbar)
+        root.addLayout(self._build_toolbar())
 
-        # --- Main splitter ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # Chart
         self._chart = ChartWidget()
         splitter.addWidget(self._chart)
 
-        # Right panel tabs
         right_tabs = QTabWidget()
         right_tabs.setMinimumWidth(340)
 
-        # Training control tab (wrapped in scroll area)
         training_widget = self._build_training_panel()
         training_scroll = QScrollArea()
         training_scroll.setWidget(training_widget)
@@ -88,7 +87,6 @@ class MainWindow(QMainWindow):
         training_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_tabs.addTab(training_scroll, "训练")
 
-        # Review tab (wrapped in scroll area)
         self._review_panel = ReviewPanel(self._stats_service)
         review_scroll = QScrollArea()
         review_scroll.setWidget(self._review_panel)
@@ -96,16 +94,20 @@ class MainWindow(QMainWindow):
         review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_tabs.addTab(review_scroll, "复盘")
 
+        data_widget = self._build_data_panel()
+        data_scroll = QScrollArea()
+        data_scroll.setWidget(data_widget)
+        data_scroll.setWidgetResizable(True)
+        data_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_tabs.addTab(data_scroll, "数据")
+
         splitter.addWidget(right_tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         root.addWidget(splitter, stretch=1)
 
-        # --- Playback bar ---
-        playback = self._build_playback_bar()
-        root.addLayout(playback)
+        root.addLayout(self._build_playback_bar())
 
-        # --- Status bar ---
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._lbl_status = QLabel("就绪")
@@ -117,34 +119,26 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> QHBoxLayout:
         row = QHBoxLayout()
-
         row.addWidget(QLabel("代码:"))
         self._inp_symbol = QLineEdit("000001")
         self._inp_symbol.setMaximumWidth(100)
         row.addWidget(self._inp_symbol)
-
         self._btn_search = QPushButton("搜索")
         row.addWidget(self._btn_search)
-
-        row.addWidget(QLabel("周期:"))
-        self._cmb_tf = QComboBox()
-        for tf in [Timeframe.DAILY, Timeframe.H1, Timeframe.M30, Timeframe.M15]:
-            self._cmb_tf.addItem(tf.label, tf)
-        row.addWidget(self._cmb_tf)
 
         row.addWidget(QLabel("可见K线:"))
         self._spn_visible = QSpinBox()
         self._spn_visible.setRange(20, 200)
         self._spn_visible.setValue(60)
         row.addWidget(self._spn_visible)
-
         row.addWidget(QLabel("未来K线:"))
         self._spn_future = QSpinBox()
         self._spn_future.setRange(20, 500)
         self._spn_future.setValue(120)
         row.addWidget(self._spn_future)
 
-        self._btn_download = QPushButton("下载数据")
+        self._btn_download = QPushButton("下载数据(4周期)")
+        self._btn_download.setToolTip("下载月线/日线/5分钟/1分钟")
         row.addWidget(self._btn_download)
 
         self._btn_start = QPushButton("开始训练")
@@ -160,7 +154,6 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        # Mode selection
         mode_group = QGroupBox("训练模式")
         mg = QHBoxLayout(mode_group)
         self._rb_trade = QRadioButton("模拟交易")
@@ -173,7 +166,6 @@ class MainWindow(QMainWindow):
         mg.addWidget(self._rb_predict)
         layout.addWidget(mode_group)
 
-        # --- Trade controls ---
         self._trade_box = QGroupBox("交易操作")
         tb = QVBoxLayout(self._trade_box)
         tb.setSpacing(6)
@@ -206,12 +198,12 @@ class MainWindow(QMainWindow):
         tb.addLayout(tp_row)
 
         btn_row = QHBoxLayout()
-        self._btn_buy = QPushButton("做多")
+        self._btn_buy = QPushButton("市价做多")
         self._btn_buy.setMinimumHeight(32)
-        self._btn_buy.setStyleSheet("background:#ef5350; color:white; font-weight:bold;")
-        self._btn_sell = QPushButton("做空")
+        self._btn_buy.setStyleSheet("background:#ef5350;color:white;font-weight:bold;")
+        self._btn_sell = QPushButton("市价做空")
         self._btn_sell.setMinimumHeight(32)
-        self._btn_sell.setStyleSheet("background:#26a69a; color:white; font-weight:bold;")
+        self._btn_sell.setStyleSheet("background:#26a69a;color:white;font-weight:bold;")
         self._btn_sell.setEnabled(False)
         self._btn_close = QPushButton("平仓")
         self._btn_close.setMinimumHeight(32)
@@ -220,31 +212,43 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._btn_close)
         tb.addLayout(btn_row)
 
+        limit_row = QHBoxLayout()
+        self._btn_limit_buy = QPushButton("限价买入")
+        self._btn_limit_buy.setMinimumHeight(28)
+        self._btn_limit_buy.setStyleSheet("background:#b85450;color:white;")
+        self._btn_limit_sell = QPushButton("限价卖出")
+        self._btn_limit_sell.setMinimumHeight(28)
+        self._btn_limit_sell.setStyleSheet("background:#1e8c7e;color:white;")
+        self._btn_limit_sell.setEnabled(False)
+        self._btn_cancel_limit = QPushButton("撤单")
+        self._btn_cancel_limit.setMinimumHeight(28)
+        limit_row.addWidget(self._btn_limit_buy)
+        limit_row.addWidget(self._btn_limit_sell)
+        limit_row.addWidget(self._btn_cancel_limit)
+        tb.addLayout(limit_row)
+
         self._lbl_trade_info = QLabel("无持仓")
         self._lbl_trade_info.setWordWrap(True)
         self._lbl_trade_info.setMinimumHeight(50)
         tb.addWidget(self._lbl_trade_info)
         layout.addWidget(self._trade_box)
 
-        # --- Predict controls ---
         self._predict_box = QGroupBox("方向预测")
         pb = QVBoxLayout(self._predict_box)
         pb.setSpacing(6)
-
         pred_row = QHBoxLayout()
         self._btn_up = QPushButton("看涨")
         self._btn_up.setMinimumHeight(32)
-        self._btn_up.setStyleSheet("background:#ef5350; color:white; font-weight:bold;")
+        self._btn_up.setStyleSheet("background:#ef5350;color:white;font-weight:bold;")
         self._btn_down = QPushButton("看跌")
         self._btn_down.setMinimumHeight(32)
-        self._btn_down.setStyleSheet("background:#26a69a; color:white; font-weight:bold;")
+        self._btn_down.setStyleSheet("background:#26a69a;color:white;font-weight:bold;")
         self._btn_side = QPushButton("震荡")
         self._btn_side.setMinimumHeight(32)
         pred_row.addWidget(self._btn_up)
         pred_row.addWidget(self._btn_down)
         pred_row.addWidget(self._btn_side)
         pb.addLayout(pred_row)
-
         look_row = QHBoxLayout()
         look_row.addWidget(QLabel("预测前瞻:"))
         self._spn_look = QSpinBox()
@@ -253,7 +257,6 @@ class MainWindow(QMainWindow):
         look_row.addWidget(self._spn_look)
         look_row.addWidget(QLabel("根"))
         pb.addLayout(look_row)
-
         self._lbl_predict_info = QLabel("暂无预测")
         self._lbl_predict_info.setWordWrap(True)
         self._lbl_predict_info.setMinimumHeight(40)
@@ -261,7 +264,6 @@ class MainWindow(QMainWindow):
         self._predict_box.setVisible(False)
         layout.addWidget(self._predict_box)
 
-        # --- Live stats ---
         stats_group = QGroupBox("本轮统计")
         sg = QVBoxLayout(stats_group)
         self._lbl_live_stats = QLabel("--")
@@ -270,7 +272,6 @@ class MainWindow(QMainWindow):
         sg.addWidget(self._lbl_live_stats)
         layout.addWidget(stats_group)
 
-        # --- End session ---
         self._btn_finish = QPushButton("结束训练并保存")
         self._btn_finish.setMinimumHeight(34)
         layout.addWidget(self._btn_finish)
@@ -280,7 +281,25 @@ class MainWindow(QMainWindow):
 
     def _build_playback_bar(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        self._btn_prev = QPushButton("|◀")
+
+        # TF switch buttons
+        row.addWidget(QLabel("周期:"))
+        self._tf_btns: Dict[Timeframe, QPushButton] = {}
+        tf_labels = {
+            Timeframe.MONTHLY: "月", Timeframe.DAILY: "日",
+            Timeframe.M5: "5m", Timeframe.M1: "1m",
+        }
+        for tf in TRAINING_TFS:
+            btn = QPushButton(tf_labels.get(tf, tf.label))
+            btn.setCheckable(True)
+            btn.setMinimumWidth(36)
+            btn.setMaximumWidth(50)
+            btn.clicked.connect(lambda checked, t=tf: self._switch_timeframe(t))
+            self._tf_btns[tf] = btn
+            row.addWidget(btn)
+        self._tf_btns[Timeframe.DAILY].setChecked(True)
+
+        row.addWidget(QLabel("  "))
         self._btn_next = QPushButton("▶|")
         self._btn_next5 = QPushButton("▶▶5")
         self._btn_play = QPushButton("▶ 播放")
@@ -304,12 +323,43 @@ class MainWindow(QMainWindow):
         row.addStretch()
         return row
 
+    def _build_data_panel(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        layout.addWidget(QLabel("已下载数据:"))
+        self._data_table = QTableWidget()
+        self._data_table.setColumnCount(5)
+        self._data_table.setHorizontalHeaderLabels(["代码", "周期", "K线数", "起始", "结束"])
+        self._data_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._data_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._data_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self._data_table)
+
+        btn_row = QHBoxLayout()
+        self._btn_refresh_data = QPushButton("刷新列表")
+        self._btn_refresh_data.clicked.connect(self._refresh_data_table)
+        self._btn_delete_sel = QPushButton("删除选中")
+        self._btn_delete_sel.clicked.connect(self._on_delete_selected_data)
+        self._btn_delete_all = QPushButton("清空全部")
+        self._btn_delete_all.clicked.connect(self._on_delete_all_data)
+        btn_row.addWidget(self._btn_refresh_data)
+        btn_row.addWidget(self._btn_delete_sel)
+        btn_row.addWidget(self._btn_delete_all)
+        layout.addLayout(btn_row)
+
+        layout.addStretch()
+        return w
+
     # ==================================================================
-    # Signal wiring
+    # Signals
     # ==================================================================
 
     def _connect_signals(self):
         self._chart.chart_ready.connect(self._on_chart_ready)
+        self._chart.limit_price_changed.connect(self._on_limit_price_dragged)
         self._btn_download.clicked.connect(self._on_download)
         self._btn_start.clicked.connect(self._on_start_session)
         self._btn_finish.clicked.connect(self._on_finish_session)
@@ -323,6 +373,9 @@ class MainWindow(QMainWindow):
         self._btn_buy.clicked.connect(self._on_buy)
         self._btn_sell.clicked.connect(self._on_sell)
         self._btn_close.clicked.connect(self._on_close_position)
+        self._btn_limit_buy.clicked.connect(self._on_limit_buy)
+        self._btn_limit_sell.clicked.connect(self._on_limit_sell)
+        self._btn_cancel_limit.clicked.connect(self._on_cancel_limit)
 
         self._btn_up.clicked.connect(lambda: self._on_predict(PredictionDirection.UP))
         self._btn_down.clicked.connect(lambda: self._on_predict(PredictionDirection.DOWN))
@@ -342,29 +395,30 @@ class MainWindow(QMainWindow):
         code = self._inp_symbol.text().strip()
         if not code:
             return
-        tf: Timeframe = self._cmb_tf.currentData()
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
-        self._lbl_status.setText(f"正在下载 {code} {tf.label} (可能需要几秒)...")
         self._btn_download.setEnabled(False)
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-        try:
-            count = self._engine.ensure_data(symbol, tf, force=True)
-            self._lbl_status.setText(f"下载完成: {code} {tf.label} 共 {count} 根K线")
-        except Exception as e:
-            QMessageBox.warning(self, "下载失败", str(e))
-            self._lbl_status.setText("下载失败")
-        finally:
-            self._btn_download.setEnabled(True)
+        results = {}
+        for tf in TRAINING_TFS:
+            self._lbl_status.setText(f"正在下载 {code} {tf.label} ...")
+            QApplication.processEvents()
+            try:
+                cnt = self._engine.ensure_data(symbol, tf, force=True)
+                results[tf] = cnt
+            except Exception as e:
+                results[tf] = f"失败: {e}"
+        parts = [f"{tf.label}: {results[tf]}" for tf in TRAINING_TFS]
+        self._lbl_status.setText(f"下载完成 {code} — " + " | ".join(parts))
+        self._btn_download.setEnabled(True)
+        self._refresh_data_table()
 
     def _on_start_session(self):
         code = self._inp_symbol.text().strip()
         if not code:
             return
-        tf: Timeframe = self._cmb_tf.currentData()
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
 
-        if not self._cache.has_data(symbol, tf):
+        primary_tf = Timeframe.DAILY
+        if not self._cache.has_data(symbol, primary_tf):
             QMessageBox.information(self, "提示", "请先下载数据")
             return
 
@@ -372,30 +426,88 @@ class MainWindow(QMainWindow):
         future_n = self._spn_future.value()
 
         try:
-            visible, future = self._engine.random_slice(symbol, tf, visible_n, future_n)
+            visible, future = self._engine.random_slice(symbol, primary_tf, visible_n, future_n)
         except ValueError as e:
             QMessageBox.warning(self, "数据不足", str(e))
             return
 
+        start_dt = visible[0].timestamp - timedelta(days=30)
+        end_dt = future[-1].timestamp + timedelta(days=30)
+
+        self._tf_candles = {}
+        for tf in TRAINING_TFS:
+            all_c = self._engine.load_all(symbol, tf)
+            self._tf_candles[tf] = [c for c in all_c if start_dt <= c.timestamp <= end_dt]
+
+        self._time_cursor = visible[-1].timestamp
+        self._active_tf = primary_tf
+        self._training_symbol = symbol
+
         mode = TrainingMode.TRADE if self._rb_trade.isChecked() else TrainingMode.PREDICT
         self._session = ReplaySession()
-        self._session.setup(symbol, tf, mode, visible, future)
+        vis_for_session = [c for c in self._tf_candles[primary_tf] if c.timestamp <= self._time_cursor]
+        fut_for_session = [c for c in self._tf_candles[primary_tf] if c.timestamp > self._time_cursor]
+        self._session.setup(symbol, primary_tf, mode, vis_for_session, fut_for_session)
         self._session.start()
 
         self._trade_mode = TradeMode(self._session) if mode == TrainingMode.TRADE else None
         self._predict_mode = PredictMode(self._session) if mode == TrainingMode.PREDICT else None
-
         self._btn_sell.setEnabled(self._rules.allows_short())
+        self._btn_limit_sell.setEnabled(self._rules.allows_short())
 
-        self._chart.set_timeframe(tf)
-        self._chart.set_candles(visible)
+        self._chart.set_timeframe(primary_tf)
+        self._chart.set_candles(vis_for_session)
+        self._chart.set_ma_data(vis_for_session)
+        self._update_tf_buttons()
         self._update_bar_label()
         self._update_live_stats()
-        self._lbl_status.setText(f"训练开始: {code} {tf.label}")
+        self._lbl_status.setText(f"训练开始: {code} {primary_tf.label}")
+
+    def _switch_timeframe(self, tf: Timeframe):
+        if self._session.state not in (SessionState.RUNNING, SessionState.PAUSED):
+            return
+        if tf not in self._tf_candles or not self._tf_candles[tf]:
+            self._lbl_status.setText(f"{tf.label} 无数据")
+            return
+
+        position = self._session.position
+        closed_trades = list(self._session.closed_trades)
+        predictions = list(self._session.predictions)
+        state = self._session.state
+        started_at = self._session.started_at
+
+        candles = self._tf_candles[tf]
+        vis = [c for c in candles if c.timestamp <= self._time_cursor]
+        fut = [c for c in candles if c.timestamp > self._time_cursor]
+
+        self._session.visible_candles = vis
+        self._session.future_candles = fut
+        self._session.current_index = 0
+        self._session.timeframe = tf
+        self._session.position = position
+        self._session.closed_trades = closed_trades
+        self._session.predictions = predictions
+        self._session.state = state
+        self._session.started_at = started_at
+
+        self._active_tf = tf
+        self._chart.set_timeframe(tf)
+        self._chart.set_candles(vis)
+        self._chart.set_ma_data(vis)
+        self._refresh_markers()
+        self._update_tf_buttons()
+        self._update_bar_label()
+        self._lbl_status.setText(f"切换到 {tf.label}")
+
+    def _update_tf_buttons(self):
+        for t, btn in self._tf_btns.items():
+            btn.setChecked(t == self._active_tf)
 
     def _advance(self, steps: int = 1):
         if self._session.state != SessionState.RUNNING:
             return
+
+        old_count = len(self._session.displayed_candles)
 
         if self._trade_mode:
             closed = self._trade_mode.advance_and_check(steps)
@@ -406,8 +518,15 @@ class MainWindow(QMainWindow):
         else:
             self._session.advance(steps)
 
-        revealed = self._session.displayed_candles
-        self._chart.set_candles(revealed)
+        new_candles = self._session.displayed_candles[old_count:]
+        for candle in new_candles:
+            self._chart.add_candle(candle)
+            self._check_limit_order(candle)
+
+        if new_candles:
+            self._time_cursor = new_candles[-1].timestamp
+            self._chart.add_ma_point(self._session.displayed_candles)
+
         self._refresh_markers()
         self._update_position_display()
         self._update_bar_label()
@@ -442,16 +561,13 @@ class MainWindow(QMainWindow):
         if self._play_timer.isActive():
             self._play_timer.setInterval(val)
 
-    # --- Mode toggle ---
-
     def _on_mode_toggle(self, btn_id, checked):
         if not checked:
             return
-        is_trade = btn_id == 0
-        self._trade_box.setVisible(is_trade)
-        self._predict_box.setVisible(not is_trade)
+        self._trade_box.setVisible(btn_id == 0)
+        self._predict_box.setVisible(btn_id != 0)
 
-    # --- Trade actions ---
+    # --- Trade ---
 
     def _on_buy(self):
         if not self._trade_mode or self._session.state != SessionState.RUNNING:
@@ -461,11 +577,6 @@ class MainWindow(QMainWindow):
         pos = self._trade_mode.open_long(self._spn_qty.value(), sl, tp)
         if pos:
             self._update_position_display()
-            self._chart.draw_price_line(pos.entry_price, "#FFD700")
-            if sl:
-                self._chart.draw_price_line(sl, "#ef5350")
-            if tp:
-                self._chart.draw_price_line(tp, "#26a69a")
 
     def _on_sell(self):
         if not self._trade_mode or self._session.state != SessionState.RUNNING:
@@ -484,11 +595,86 @@ class MainWindow(QMainWindow):
             self._on_trade_closed(closed)
 
     def _on_trade_closed(self, trade):
+        self._chart.remove_all_limits()
+        self._pending_limit = None
         self._refresh_markers()
         self._update_position_display()
         self._update_live_stats()
 
-    # --- Predict actions ---
+    # --- Limit orders ---
+
+    def _on_limit_buy(self):
+        if not self._trade_mode or self._session.state != SessionState.RUNNING:
+            return
+        if self._session.position:
+            QMessageBox.information(self, "提示", "已有持仓，请先平仓")
+            return
+        candle = self._session.current_candle
+        if not candle:
+            return
+        price = round(candle.close * 0.99, 2)
+        oid = "limit_buy"
+        self._pending_limit = {"id": oid, "price": price, "direction": "long"}
+        self._chart.add_limit_order(oid, price, "long", "#ef5350")
+        self._lbl_trade_info.setText(f"限价买入委托: {price:.2f}\n(拖动线调整价格)")
+
+    def _on_limit_sell(self):
+        if not self._trade_mode or self._session.state != SessionState.RUNNING:
+            return
+        if self._session.position:
+            QMessageBox.information(self, "提示", "已有持仓，请先平仓")
+            return
+        candle = self._session.current_candle
+        if not candle:
+            return
+        price = round(candle.close * 1.01, 2)
+        oid = "limit_sell"
+        self._pending_limit = {"id": oid, "price": price, "direction": "short"}
+        self._chart.add_limit_order(oid, price, "short", "#26a69a")
+        self._lbl_trade_info.setText(f"限价卖出委托: {price:.2f}\n(拖动线调整价格)")
+
+    def _on_cancel_limit(self):
+        if self._pending_limit:
+            self._chart.remove_limit_order(self._pending_limit["id"])
+            self._pending_limit = None
+            self._lbl_trade_info.setText("委托已撤销")
+
+    def _on_limit_price_dragged(self, order_id: str, new_price: float):
+        if self._pending_limit and self._pending_limit["id"] == order_id:
+            self._pending_limit["price"] = new_price
+            d = "买入" if self._pending_limit["direction"] == "long" else "卖出"
+            self._lbl_trade_info.setText(f"限价{d}委托: {new_price:.2f}\n(拖动线调整价格)")
+
+    def _check_limit_order(self, candle):
+        if not self._pending_limit or not self._trade_mode or self._session.position:
+            return
+        lo = self._pending_limit
+        triggered = False
+        if lo["direction"] == "long" and candle.low <= lo["price"]:
+            triggered = True
+            pos = self._trade_mode.open_long(
+                self._spn_qty.value(),
+                self._spn_sl.value() or None,
+                self._spn_tp.value() or None,
+            )
+            if pos:
+                pos.entry_price = lo["price"]
+        elif lo["direction"] == "short" and candle.high >= lo["price"]:
+            triggered = True
+            pos = self._trade_mode.open_short(
+                self._spn_qty.value(),
+                self._spn_sl.value() or None,
+                self._spn_tp.value() or None,
+            )
+            if pos:
+                pos.entry_price = lo["price"]
+        if triggered:
+            self._chart.remove_limit_order(lo["id"])
+            self._pending_limit = None
+            self._update_position_display()
+            self._lbl_status.setText(f"限价委托成交 @ {lo['price']:.2f}")
+
+    # --- Predict ---
 
     def _on_predict(self, direction: PredictionDirection):
         if not self._predict_mode or self._session.state != SessionState.RUNNING:
@@ -496,26 +682,53 @@ class MainWindow(QMainWindow):
         self._predict_mode.predict(direction, self._spn_look.value())
         self._update_live_stats()
 
-    # --- Finish session ---
+    # --- Finish ---
 
     def _on_finish_session(self):
-        if self._session.state in (SessionState.IDLE,):
+        if self._session.state == SessionState.IDLE:
             return
         self._on_pause()
-
-        if self._session.position:
-            self._trade_mode.close("session_end") if self._trade_mode else None
-
+        if self._session.position and self._trade_mode:
+            self._trade_mode.close("session_end")
         self._session.finish()
         if self._predict_mode:
             self._session.evaluate_predictions()
-
         self._stats_service.save_session(self._session)
         self._review_panel.refresh()
         self._update_live_stats()
-
         QMessageBox.information(self, "训练结束", "训练记录已保存!\n切换到[复盘]标签查看详情。")
         self._lbl_status.setText("训练已保存")
+
+    # --- Data management ---
+
+    def _refresh_data_table(self):
+        summary = self._cache.get_cache_summary()
+        self._data_table.setRowCount(len(summary))
+        for i, item in enumerate(summary):
+            self._data_table.setItem(i, 0, QTableWidgetItem(item["symbol"]))
+            self._data_table.setItem(i, 1, QTableWidgetItem(item["tf"]))
+            self._data_table.setItem(i, 2, QTableWidgetItem(str(item["bars"])))
+            self._data_table.setItem(i, 3, QTableWidgetItem(item["start"]))
+            self._data_table.setItem(i, 4, QTableWidgetItem(item["end"]))
+
+    def _on_delete_selected_data(self):
+        rows = set(idx.row() for idx in self._data_table.selectedIndexes())
+        if not rows:
+            return
+        if QMessageBox.question(self, "确认", "删除选中数据?") != QMessageBox.StandardButton.Yes:
+            return
+        for r in sorted(rows, reverse=True):
+            sym = self._data_table.item(r, 0).text()
+            tf = self._data_table.item(r, 1).text()
+            self._cache.delete_symbol_data(sym, tf)
+        self._refresh_data_table()
+
+    def _on_delete_all_data(self):
+        if QMessageBox.question(self, "确认", "清空所有已下载数据?") != QMessageBox.StandardButton.Yes:
+            return
+        for sym in self._cache.list_cached_symbols():
+            self._cache.delete_symbol_data(sym)
+        self._refresh_data_table()
 
     # ==================================================================
     # Display helpers
@@ -524,7 +737,7 @@ class MainWindow(QMainWindow):
     def _update_bar_label(self):
         idx = self._session.current_index
         total = self._session.total_future_bars
-        self._lbl_bar_info.setText(f"K线: {idx}/{total}")
+        self._lbl_bar_info.setText(f"K线: {idx}/{total}  [{self._active_tf.label}]")
 
     def _update_position_display(self):
         pos = self._session.position
@@ -549,14 +762,10 @@ class MainWindow(QMainWindow):
     def _update_live_stats(self):
         if self._trade_mode:
             self._lbl_live_stats.setText(self._trade_mode.summary_text())
-            self._lbl_score.setText(
-                f"胜率 {self._trade_mode.compute_stats().win_rate:.0%}"
-            )
+            self._lbl_score.setText(f"胜率 {self._trade_mode.compute_stats().win_rate:.0%}")
         elif self._predict_mode:
             self._lbl_live_stats.setText(self._predict_mode.summary_text())
-            self._lbl_score.setText(
-                f"准确率 {self._predict_mode.get_result().accuracy:.0%}"
-            )
+            self._lbl_score.setText(f"准确率 {self._predict_mode.get_result().accuracy:.0%}")
 
     def _refresh_markers(self):
         if not self._session.closed_trades:

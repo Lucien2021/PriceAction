@@ -19,6 +19,7 @@ class Timeframe(Enum):
     H1 = ("60m", 60)
     DAILY = ("daily", 1440)
     WEEKLY = ("weekly", 10080)
+    MONTHLY = ("monthly", 43200)
 
     def __init__(self, label: str, minutes: int):
         self.label = label

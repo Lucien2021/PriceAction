@@ -101,3 +101,26 @@ class CacheRepository:
     def list_cached_symbols(self) -> List[str]:
         rows = self._conn.execute("SELECT DISTINCT symbol FROM candle_cache").fetchall()
         return [r[0] for r in rows]
+
+    def get_cache_summary(self) -> List[dict]:
+        rows = self._conn.execute(
+            "SELECT symbol, tf, COUNT(*) as cnt, MIN(ts), MAX(ts) "
+            "FROM candle_cache GROUP BY symbol, tf ORDER BY symbol, tf"
+        ).fetchall()
+        return [
+            {"symbol": r[0], "tf": r[1], "bars": r[2], "start": r[3][:10], "end": r[4][:10]}
+            for r in rows
+        ]
+
+    def delete_symbol_data(self, symbol_code: str, timeframe_label: str | None = None) -> int:
+        if timeframe_label:
+            cur = self._conn.execute(
+                "DELETE FROM candle_cache WHERE symbol=? AND tf=?",
+                (symbol_code, timeframe_label),
+            )
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM candle_cache WHERE symbol=?", (symbol_code,),
+            )
+        self._conn.commit()
+        return cur.rowcount

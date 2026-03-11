@@ -18,6 +18,7 @@ _PERIOD_MAP = {
     Timeframe.H1: "60",
     Timeframe.DAILY: "daily",
     Timeframe.WEEKLY: "weekly",
+    Timeframe.MONTHLY: "monthly",
 }
 
 
@@ -61,7 +62,8 @@ class AKShareProvider:
         end_date: Optional[str],
         adjust: str,
     ) -> List[Candle]:
-        period = "daily" if timeframe == Timeframe.DAILY else "weekly"
+        period_map = {Timeframe.DAILY: "daily", Timeframe.WEEKLY: "weekly", Timeframe.MONTHLY: "monthly"}
+        period = period_map.get(timeframe, "daily")
         kwargs = {
             "symbol": symbol.code,
             "period": period,

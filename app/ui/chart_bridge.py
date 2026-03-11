@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import List, Optional, Callable
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtWebChannel import QWebChannel
@@ -16,19 +16,26 @@ _HTML_PATH = Path(__file__).parent / "resources" / "chart.html"
 
 class _Bridge(QObject):
     chart_ready_signal = Signal()
+    limit_price_moved = Signal(str, float)  # order_id, new_price
 
     @Slot()
     def chartReady(self):
         self.chart_ready_signal.emit()
 
+    @Slot(str, float)
+    def onLimitPriceMoved(self, order_id: str, new_price: float):
+        self.limit_price_moved.emit(order_id, new_price)
+
 
 class ChartWidget(QWebEngineView):
     chart_ready = Signal()
+    limit_price_changed = Signal(str, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._bridge = _Bridge()
         self._bridge.chart_ready_signal.connect(self._on_ready)
+        self._bridge.limit_price_moved.connect(self.limit_price_changed)
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
         self.page().setWebChannel(self._channel)
@@ -52,33 +59,88 @@ class ChartWidget(QWebEngineView):
         else:
             self._pending_calls.append(js)
 
+    # ------------------------------------------------------------------
+    # Core data
+    # ------------------------------------------------------------------
+
     def set_timeframe(self, tf: Timeframe) -> None:
         self._timeframe = tf
 
     def set_candles(self, candles: List[Candle]) -> None:
         candle_data = [c.to_chart_dict(self._timeframe) for c in candles]
         volume_data = [c.to_volume_dict(self._timeframe) for c in candles]
-        cj = json.dumps(candle_data, ensure_ascii=False)
-        vj = json.dumps(volume_data, ensure_ascii=False)
-        self._run_js(f"setData({cj}, {vj})")
+        self._run_js(f"setData({json.dumps(candle_data)}, {json.dumps(volume_data)})")
 
     def add_candle(self, candle: Candle) -> None:
-        cd = json.dumps(candle.to_chart_dict(self._timeframe), ensure_ascii=False)
-        vd = json.dumps(candle.to_volume_dict(self._timeframe), ensure_ascii=False)
+        cd = json.dumps(candle.to_chart_dict(self._timeframe))
+        vd = json.dumps(candle.to_volume_dict(self._timeframe))
         self._run_js(f"addCandle({cd}, {vd})")
 
     def set_markers(self, markers: list) -> None:
-        mj = json.dumps(markers, ensure_ascii=False)
-        self._run_js(f"setMarkers({mj})")
+        self._run_js(f"setMarkers({json.dumps(markers, ensure_ascii=False)})")
 
-    def draw_price_line(self, price: float, color: str = "#FFD700", width: int = 1) -> None:
-        self._run_js(f"drawHorizontalLine({price}, '{color}', {width}, 2)")
+    def set_ma_data(self, candles: List[Candle], period: int = 20) -> None:
+        if len(candles) < period:
+            return
+        ma_data = []
+        for i in range(period - 1, len(candles)):
+            window = candles[i - period + 1: i + 1]
+            avg = sum(c.close for c in window) / period
+            c = candles[i]
+            if self._timeframe.minutes >= Timeframe.DAILY.minutes:
+                t = c.timestamp.strftime("%Y-%m-%d")
+            else:
+                t = int(c.timestamp.timestamp())
+            ma_data.append({"time": t, "value": round(avg, 2)})
+        self._run_js(f"setMAData({json.dumps(ma_data)})")
+
+    def add_ma_point(self, candles: List[Candle], period: int = 20) -> None:
+        if len(candles) < period:
+            return
+        window = candles[-period:]
+        avg = sum(c.close for c in window) / period
+        c = candles[-1]
+        if self._timeframe.minutes >= Timeframe.DAILY.minutes:
+            t = c.timestamp.strftime("%Y-%m-%d")
+        else:
+            t = int(c.timestamp.timestamp())
+        self._run_js(f"addMAPoint({json.dumps({'time': t, 'value': round(avg, 2)})})")
 
     def clear(self) -> None:
         self._run_js("clearChart()")
 
     def fit(self) -> None:
         self._run_js("fitContent()")
+
+    # ------------------------------------------------------------------
+    # Limit orders
+    # ------------------------------------------------------------------
+
+    def add_limit_order(self, order_id: str, price: float, direction: str, color: str = "#FFD700") -> None:
+        self._run_js(f"addLimitOrder('{order_id}', {price}, '{direction}', '{color}')")
+
+    def remove_limit_order(self, order_id: str) -> None:
+        self._run_js(f"removeLimitOrder('{order_id}')")
+
+    def update_limit_price(self, order_id: str, price: float) -> None:
+        self._run_js(f"updateLimitPrice('{order_id}', {price})")
+
+    def remove_all_limits(self) -> None:
+        self._run_js("removeAllLimitOrders()")
+
+    # ------------------------------------------------------------------
+    # Drawing tools
+    # ------------------------------------------------------------------
+
+    def set_draw_mode(self, mode: str) -> None:
+        self._run_js(f"setDrawMode('{mode}')")
+
+    def clear_drawings(self) -> None:
+        self._run_js("clearDrawings()")
+
+    # ------------------------------------------------------------------
+    # Trade markers builder
+    # ------------------------------------------------------------------
 
     def build_trade_markers(self, trades, timeframe: Timeframe) -> list:
         markers = []

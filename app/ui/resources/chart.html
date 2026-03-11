@@ -3,135 +3,431 @@
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #1e222d; overflow: hidden; font-family: sans-serif; }
-  #chart { width: 100vw; height: 100vh; }
-  #info-overlay {
-    position: absolute; top: 8px; left: 12px; z-index: 10;
-    color: #d1d4dc; font-size: 12px; pointer-events: none;
-  }
-  #info-overlay span { margin-right: 12px; }
-  .up { color: #ef5350; }
-  .down { color: #26a69a; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1e222d;overflow:hidden;font-family:'Segoe UI',sans-serif}
+  #container{position:relative;width:100vw;height:100vh}
+  #chart{width:100%;height:100%}
+  #draw-canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5}
+  #info-overlay{position:absolute;top:8px;left:12px;z-index:10;color:#d1d4dc;font-size:12px;pointer-events:none}
+  #info-overlay span{margin-right:12px}
+  .up{color:#ef5350}.down{color:#26a69a}
+  #toolbar{position:absolute;top:8px;right:12px;z-index:15;display:flex;gap:3px}
+  #toolbar button{background:#2B2B43;color:#d1d4dc;border:1px solid #3d3d5c;padding:3px 7px;font-size:11px;cursor:pointer;border-radius:3px}
+  #toolbar button:hover{background:#3d3d5c}
+  #toolbar button.active{background:#5b5bff;border-color:#7b7bff}
 </style>
 </head>
 <body>
-<div id="info-overlay"></div>
-<div id="chart"></div>
+<div id="container">
+  <div id="info-overlay"></div>
+  <div id="toolbar">
+    <button onclick="setDrawMode('none')" id="tb-none" class="active">指针</button>
+    <button onclick="setDrawMode('hline')" id="tb-hline">水平线</button>
+    <button onclick="setDrawMode('rect')" id="tb-rect">矩形</button>
+    <button onclick="setDrawMode('rr')" id="tb-rr">盈亏比</button>
+    <button onclick="setDrawMode('channel')" id="tb-channel">通道</button>
+    <button onclick="undoDrawing()">撤销</button>
+    <button onclick="clearDrawings()">清除</button>
+  </div>
+  <div id="chart"></div>
+  <canvas id="draw-canvas"></canvas>
+</div>
 <script src="lightweight-charts.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
-var chart = null;
-var candleSeries = null;
-var volumeSeries = null;
-var bridge = null;
-var _ready = false;
+/* ================================================================
+   CHART CORE + MA
+   ================================================================ */
+var chart, candleSeries, volumeSeries, maSeries, bridge;
 
-function initChart() {
-    try {
-        chart = LightweightCharts.createChart(document.getElementById('chart'), {
-            layout: { background: { type: 'solid', color: '#1e222d' }, textColor: '#d1d4dc' },
-            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
-            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-            rightPriceScale: { borderColor: '#2B2B43' },
-            timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false },
-            width: window.innerWidth,
-            height: window.innerHeight,
-        });
+function initChart(){
+  chart=LightweightCharts.createChart(document.getElementById('chart'),{
+    layout:{background:{type:'solid',color:'#1e222d'},textColor:'#d1d4dc'},
+    grid:{vertLines:{color:'#2B2B43'},horzLines:{color:'#2B2B43'}},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+    rightPriceScale:{borderColor:'#2B2B43'},
+    timeScale:{borderColor:'#2B2B43',timeVisible:true,secondsVisible:false},
+    width:window.innerWidth,height:window.innerHeight,
+  });
+  candleSeries=chart.addCandlestickSeries({
+    upColor:'#ef5350',downColor:'#26a69a',
+    borderUpColor:'#ef5350',borderDownColor:'#26a69a',
+    wickUpColor:'#ef5350',wickDownColor:'#26a69a',
+  });
+  volumeSeries=chart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume'});
+  chart.priceScale('volume').applyOptions({scaleMargins:{top:0.8,bottom:0}});
 
-        candleSeries = chart.addCandlestickSeries({
-            upColor: '#ef5350',
-            downColor: '#26a69a',
-            borderUpColor: '#ef5350',
-            borderDownColor: '#26a69a',
-            wickUpColor: '#ef5350',
-            wickDownColor: '#26a69a',
-        });
+  maSeries=chart.addLineSeries({
+    color:'#e0e040',lineWidth:1.5,
+    priceLineVisible:false,lastValueVisible:true,
+    crosshairMarkerVisible:false,title:'MA20',
+  });
 
-        volumeSeries = chart.addHistogramSeries({
-            priceFormat: { type: 'volume' },
-            priceScaleId: 'volume',
-        });
-        chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-
-        chart.subscribeCrosshairMove(function(param) {
-            var overlay = document.getElementById('info-overlay');
-            if (!param || !param.time) { overlay.innerHTML = ''; return; }
-            var d = param.seriesData.get(candleSeries);
-            if (!d) { overlay.innerHTML = ''; return; }
-            var cls = d.close >= d.open ? 'up' : 'down';
-            overlay.innerHTML =
-                '<span>O: <b class="'+cls+'">'+d.open.toFixed(2)+'</b></span>' +
-                '<span>H: <b class="'+cls+'">'+d.high.toFixed(2)+'</b></span>' +
-                '<span>L: <b class="'+cls+'">'+d.low.toFixed(2)+'</b></span>' +
-                '<span>C: <b class="'+cls+'">'+d.close.toFixed(2)+'</b></span>';
-        });
-
-        _ready = true;
-        console.log('Chart initialized OK');
-    } catch(e) {
-        console.error('Chart init failed:', e);
-        document.getElementById('chart').innerText = 'Chart init error: ' + e.message;
-    }
+  chart.subscribeCrosshairMove(function(p){
+    var ov=document.getElementById('info-overlay');
+    if(!p||!p.time){ov.innerHTML='';return}
+    var d=p.seriesData.get(candleSeries);
+    if(!d){ov.innerHTML='';return}
+    var c=d.close>=d.open?'up':'down';
+    var maVal=p.seriesData.get(maSeries);
+    var maStr=maVal?' <span>MA20:<b>'+maVal.value.toFixed(2)+'</b></span>':'';
+    ov.innerHTML='<span>O:<b class="'+c+'">'+d.open.toFixed(2)+'</b></span>'+
+      '<span>H:<b class="'+c+'">'+d.high.toFixed(2)+'</b></span>'+
+      '<span>L:<b class="'+c+'">'+d.low.toFixed(2)+'</b></span>'+
+      '<span>C:<b class="'+c+'">'+d.close.toFixed(2)+'</b></span>'+maStr;
+  });
+  chart.timeScale().subscribeVisibleLogicalRangeChange(renderAll);
 }
-
 initChart();
 
-new QWebChannel(qt.webChannelTransport, function(channel) {
-    bridge = channel.objects.bridge;
-    if (bridge) bridge.chartReady();
+new QWebChannel(qt.webChannelTransport,function(ch){
+  bridge=ch.objects.bridge;
+  if(bridge)bridge.chartReady();
 });
 
-/* -------- API called from Python via runJavaScript -------- */
+/* ================================================================
+   DATA API
+   ================================================================ */
+function setData(candles,volumes){
+  if(!candleSeries)return;
+  candleSeries.setData(candles);volumeSeries.setData(volumes);
+  chart.timeScale().fitContent();
+}
+function addCandle(candle,volume){
+  if(!candleSeries)return;
+  candleSeries.update(candle);volumeSeries.update(volume);
+}
+function setMAData(data){ if(maSeries)maSeries.setData(data); }
+function addMAPoint(pt){ if(maSeries)maSeries.update(pt); }
+function setMarkers(m){ if(candleSeries)candleSeries.setMarkers(m); }
+function clearChart(){
+  if(candleSeries)candleSeries.setData([]);
+  if(volumeSeries)volumeSeries.setData([]);
+  if(maSeries)maSeries.setData([]);
+}
+function fitContent(){if(chart)chart.timeScale().fitContent()}
 
-window._pendingData = null;
+/* ================================================================
+   COORDINATES
+   ================================================================ */
+function priceToY(p){return candleSeries?candleSeries.priceToCoordinate(p):null}
+function yToPrice(y){return candleSeries?candleSeries.coordinateToPrice(y):null}
+function timeToX(l){return chart?chart.timeScale().logicalToCoordinate(l):null}
+function xToTime(x){return chart?chart.timeScale().coordinateToLogical(x):null}
 
-function setData(candles, volumes) {
-    if (!candleSeries) { console.error('candleSeries not ready'); return; }
-    try {
-        candleSeries.setData(candles);
-        volumeSeries.setData(volumes);
-        chart.timeScale().fitContent();
-    } catch(e) { console.error('setData error:', e); }
+/* ================================================================
+   CANVAS
+   ================================================================ */
+var canvas,ctx;
+function initCanvas(){canvas=document.getElementById('draw-canvas');ctx=canvas.getContext('2d');resizeCanvas()}
+function resizeCanvas(){if(!canvas)return;canvas.width=window.innerWidth;canvas.height=window.innerHeight;renderAll()}
+
+/* ================================================================
+   DRAWING STATE
+   ================================================================ */
+var drawMode='none';
+var drawings=[];
+var currentDraw=null;
+var selectedIdx=-1;
+var dragOffset=null;
+var limitOrders={};
+var dragLimit=null;
+
+function setDrawMode(m){
+  drawMode=m;selectedIdx=-1;currentDraw=null;dragOffset=null;
+  document.querySelectorAll('#toolbar button[id]').forEach(function(b){b.classList.remove('active')});
+  var btn=document.getElementById('tb-'+m);if(btn)btn.classList.add('active');
+  canvas.style.pointerEvents=(m==='none')?'none':'auto';
+  if(m==='none')chart.applyOptions({handleScroll:true,handleScale:true});
+}
+function clearDrawings(){drawings=[];selectedIdx=-1;renderAll()}
+function undoDrawing(){if(drawings.length){drawings.pop();selectedIdx=-1;renderAll()}}
+
+/* ================================================================
+   LIMIT ORDERS
+   ================================================================ */
+function addLimitOrder(id,price,dir,color){limitOrders[id]={price:price,direction:dir,color:color||'#FFD700'};renderAll()}
+function removeLimitOrder(id){delete limitOrders[id];renderAll()}
+function updateLimitPrice(id,p){if(limitOrders[id]){limitOrders[id].price=p;renderAll()}}
+function removeAllLimitOrders(){limitOrders={};renderAll()}
+
+/* ================================================================
+   RENDER
+   ================================================================ */
+function renderAll(){
+  if(!ctx||!canvas)return;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  renderLimitOrders();
+  for(var i=0;i<drawings.length;i++) renderOne(drawings[i],i===selectedIdx);
+  if(currentDraw)renderOne(currentDraw,false,true);
 }
 
-function addCandle(candle, volume) {
-    if (!candleSeries) return;
-    try {
-        candleSeries.update(candle);
-        volumeSeries.update(volume);
-        chart.timeScale().scrollToRealTime();
-    } catch(e) { console.error('addCandle error:', e); }
+function renderLimitOrders(){
+  for(var id in limitOrders){
+    var lo=limitOrders[id],y=priceToY(lo.price);
+    if(y===null||y<0||y>canvas.height)continue;
+    ctx.save();ctx.strokeStyle=lo.color;ctx.lineWidth=2;ctx.setLineDash([8,4]);
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();
+    ctx.setLineDash([]);ctx.fillStyle=lo.color;ctx.font='11px sans-serif';
+    var lb=(lo.direction==='long'?'BUY':'SELL')+' @ '+lo.price.toFixed(2);
+    ctx.fillRect(4,y-16,ctx.measureText(lb).width+8,16);
+    ctx.fillStyle='#1e222d';ctx.fillText(lb,8,y-4);
+    ctx.fillStyle=lo.color;ctx.fillRect(canvas.width-24,y-6,20,12);
+    ctx.fillStyle='#1e222d';ctx.font='10px sans-serif';ctx.fillText('≡',canvas.width-20,y+4);
+    ctx.restore();
+  }
 }
 
-function setMarkers(markers) {
-    if (!candleSeries) return;
-    try {
-        candleSeries.setMarkers(markers);
-    } catch(e) { console.error('setMarkers error:', e); }
+function renderOne(d,isSel,isPrev){
+  ctx.save();
+  ctx.globalAlpha=isPrev?0.6:1;
+  if(isSel){ctx.shadowColor='#7b7bff';ctx.shadowBlur=6;}
+
+  if(d.type==='hline'){
+    var y=priceToY(d.price);
+    if(y===null){ctx.restore();return}
+    ctx.strokeStyle=d.color||'#e0e040';ctx.lineWidth=isSel?2.5:1.5;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();
+    ctx.fillStyle=d.color||'#e0e040';ctx.font='11px sans-serif';
+    ctx.fillText(d.price.toFixed(2),8,y-4);
+  }
+  else if(d.type==='rect'){
+    var x1=timeToX(d.lx1),y1=priceToY(d.p1),x2=timeToX(d.lx2),y2=priceToY(d.p2);
+    if(x1==null||x2==null||y1==null||y2==null){ctx.restore();return}
+    ctx.strokeStyle='#5b9bd5';ctx.lineWidth=1.5;ctx.fillStyle='rgba(91,155,213,0.12)';
+    var rx=Math.min(x1,x2),ry=Math.min(y1,y2),rw=Math.abs(x2-x1),rh=Math.abs(y2-y1);
+    ctx.fillRect(rx,ry,rw,rh);ctx.strokeRect(rx,ry,rw,rh);
+  }
+  else if(d.type==='rr'){
+    renderRR(d);
+  }
+  else if(d.type==='channel'){
+    renderChannel(d);
+  }
+  ctx.restore();
 }
 
-function clearChart() {
-    if (candleSeries) candleSeries.setData([]);
-    if (volumeSeries) volumeSeries.setData([]);
+function renderRR(d){
+  var eY=priceToY(d.entry),sY=priceToY(d.sl);
+  if(eY==null||sY==null)return;
+  var risk=Math.abs(d.entry-d.sl);if(risk===0)return;
+  var isL=d.entry>d.sl;
+  var tps=[1,2,3].map(function(n){return isL?d.entry+risk*n:d.entry-risk*n});
+  var L=50,R=canvas.width-50;
+  ctx.fillStyle='rgba(239,83,80,0.15)';
+  ctx.fillRect(L,Math.min(eY,sY),R-L,Math.abs(sY-eY));
+  ctx.fillStyle='rgba(38,166,154,0.08)';
+  var tp1Y=priceToY(tps[0]);
+  if(tp1Y!=null)ctx.fillRect(L,Math.min(eY,tp1Y),R-L,Math.abs(tp1Y-eY));
+  ctx.strokeStyle='#FFD700';ctx.lineWidth=1.5;ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(L,eY);ctx.lineTo(R,eY);ctx.stroke();
+  ctx.strokeStyle='#ef5350';ctx.setLineDash([6,3]);
+  ctx.beginPath();ctx.moveTo(L,sY);ctx.lineTo(R,sY);ctx.stroke();
+  ctx.strokeStyle='#26a69a';
+  for(var i=0;i<tps.length;i++){
+    var ty=priceToY(tps[i]);if(ty==null||ty<0||ty>canvas.height)continue;
+    ctx.beginPath();ctx.moveTo(L,ty);ctx.lineTo(R,ty);ctx.stroke();
+    ctx.setLineDash([]);ctx.fillStyle='#26a69a';ctx.font='11px sans-serif';
+    ctx.fillText((i+1)+'R '+tps[i].toFixed(2),R+4,ty+4);ctx.setLineDash([6,3]);
+  }
+  ctx.setLineDash([]);ctx.font='12px sans-serif';
+  ctx.fillStyle='#FFD700';ctx.fillText('Entry '+d.entry.toFixed(2),L+4,eY-4);
+  ctx.fillStyle='#ef5350';ctx.fillText('SL '+d.sl.toFixed(2)+' (Risk:'+risk.toFixed(2)+')',L+4,sY+(isL?14:-4));
 }
 
-function drawHorizontalLine(price, color, lineWidth, lineStyle) {
-    if (!candleSeries) return;
-    return candleSeries.createPriceLine({
-        price: price,
-        color: color || '#FFD700',
-        lineWidth: lineWidth || 1,
-        lineStyle: lineStyle || 2,
-        axisLabelVisible: true,
-    });
+function renderChannel(d){
+  var x1=timeToX(d.lx1),y1=priceToY(d.p1),x2=timeToX(d.lx2),y2=priceToY(d.p2);
+  if(x1==null||x2==null||y1==null||y2==null)return;
+  var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
+  if(len<2)return;
+  var nx=-dy/len,ny=dx/len;
+  var w=d.width||40;
+  ctx.strokeStyle='#b39ddb';ctx.lineWidth=1.5;ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+  ctx.setLineDash([5,3]);
+  ctx.beginPath();ctx.moveTo(x1+nx*w,y1+ny*w);ctx.lineTo(x2+nx*w,y2+ny*w);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x1-nx*w,y1-ny*w);ctx.lineTo(x2-nx*w,y2-ny*w);ctx.stroke();
+  ctx.fillStyle='rgba(179,157,219,0.08)';
+  ctx.beginPath();
+  ctx.moveTo(x1+nx*w,y1+ny*w);ctx.lineTo(x2+nx*w,y2+ny*w);
+  ctx.lineTo(x2-nx*w,y2-ny*w);ctx.lineTo(x1-nx*w,y1-ny*w);
+  ctx.closePath();ctx.fill();
 }
 
-function fitContent() { if (chart) chart.timeScale().fitContent(); }
-function scrollToRight() { if (chart) chart.timeScale().scrollToRealTime(); }
+/* ================================================================
+   HIT TEST & DRAG
+   ================================================================ */
+function hitTest(x,y){
+  for(var i=drawings.length-1;i>=0;i--){
+    var d=drawings[i];
+    if(d.type==='hline'){
+      var hy=priceToY(d.price);if(hy!=null&&Math.abs(hy-y)<8)return i;
+    }else if(d.type==='rect'){
+      var x1=timeToX(d.lx1),y1=priceToY(d.p1),x2=timeToX(d.lx2),y2=priceToY(d.p2);
+      if(x1!=null&&x2!=null&&y1!=null&&y2!=null){
+        var rx=Math.min(x1,x2)-5,ry=Math.min(y1,y2)-5;
+        var rw=Math.abs(x2-x1)+10,rh=Math.abs(y2-y1)+10;
+        if(x>=rx&&x<=rx+rw&&y>=ry&&y<=ry+rh)return i;
+      }
+    }else if(d.type==='rr'){
+      var eY=priceToY(d.entry),sY=priceToY(d.sl);
+      if(eY!=null&&Math.abs(eY-y)<8)return i;
+      if(sY!=null&&Math.abs(sY-y)<8)return i;
+    }else if(d.type==='channel'){
+      var cx1=timeToX(d.lx1),cy1=priceToY(d.p1),cx2=timeToX(d.lx2),cy2=priceToY(d.p2);
+      if(cx1!=null&&cx2!=null&&cy1!=null&&cy2!=null){
+        if(distToSeg(x,y,cx1,cy1,cx2,cy2)<12)return i;
+      }
+    }
+  }
+  return -1;
+}
+function distToSeg(px,py,ax,ay,bx,by){
+  var dx=bx-ax,dy=by-ay,t=((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy);
+  t=Math.max(0,Math.min(1,t));
+  var cx=ax+t*dx,cy=ay+t*dy;
+  return Math.sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
+}
+function findLimitNear(y){
+  for(var id in limitOrders){var ly=priceToY(limitOrders[id].price);if(ly!=null&&Math.abs(ly-y)<10)return id}
+  return null;
+}
 
-window.addEventListener('resize', function() {
-    if (chart) chart.applyOptions({ width: window.innerWidth, height: window.innerHeight });
+/* ================================================================
+   MOUSE
+   ================================================================ */
+var mouseDown=false,startX=0,startY=0,startPrice=0;
+
+function gmp(e){var r=canvas.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}}
+
+document.getElementById('container').addEventListener('mousedown',function(e){
+  if(e.button===2){
+    e.preventDefault();
+    var pos=gmp(e),hi=hitTest(pos.x,pos.y);
+    if(hi>=0){drawings.splice(hi,1);selectedIdx=-1;renderAll()}
+    return;
+  }
+  var pos=gmp(e);
+
+  var loId=findLimitNear(pos.y);
+  if(loId&&drawMode==='none'){
+    dragLimit=loId;canvas.style.pointerEvents='auto';
+    chart.applyOptions({handleScroll:false,handleScale:false});
+    e.preventDefault();return;
+  }
+
+  if(drawMode==='none'){
+    var hi=hitTest(pos.x,pos.y);
+    if(hi>=0){
+      selectedIdx=hi;
+      startPrice=yToPrice(pos.y)||0;
+      startX=pos.x;startY=pos.y;
+      dragOffset={origDraw:JSON.parse(JSON.stringify(drawings[hi]))};
+      canvas.style.pointerEvents='auto';
+      chart.applyOptions({handleScroll:false,handleScale:false});
+      mouseDown=true;renderAll();
+      e.preventDefault();return;
+    }
+    canvas.style.pointerEvents='none';return;
+  }
+
+  mouseDown=true;startX=pos.x;startY=pos.y;
+  var lx=xToTime(pos.x),pr=yToPrice(pos.y);
+  if(lx==null||pr==null)return;
+  chart.applyOptions({handleScroll:false,handleScale:false});
+
+  if(drawMode==='hline'){
+    drawings.push({type:'hline',price:Math.round(pr*100)/100,color:'#e0e040'});
+    mouseDown=false;
+    chart.applyOptions({handleScroll:true,handleScale:true});
+    renderAll();return;
+  }
+  if(drawMode==='rect') currentDraw={type:'rect',lx1:lx,p1:pr,lx2:lx,p2:pr};
+  else if(drawMode==='rr') currentDraw={type:'rr',entry:pr,sl:pr};
+  else if(drawMode==='channel') currentDraw={type:'channel',lx1:lx,p1:pr,lx2:lx,p2:pr,width:40};
+});
+
+document.getElementById('container').addEventListener('mousemove',function(e){
+  var pos=gmp(e);
+
+  if(dragLimit){
+    var np=yToPrice(pos.y);
+    if(np!=null){limitOrders[dragLimit].price=Math.round(np*100)/100;renderAll();
+      if(bridge)bridge.onLimitPriceMoved(dragLimit,limitOrders[dragLimit].price)}
+    return;
+  }
+
+  if(drawMode==='none'&&!mouseDown){
+    var nearLo=findLimitNear(pos.y);
+    var nearDr=hitTest(pos.x,pos.y);
+    if(nearLo||nearDr>=0){canvas.style.pointerEvents='auto';canvas.style.cursor=nearLo?'ns-resize':'grab'}
+    else{canvas.style.pointerEvents='none';canvas.style.cursor='default'}
+    return;
+  }
+
+  if(drawMode==='none'&&mouseDown&&selectedIdx>=0&&dragOffset){
+    var dy=pos.y-startY;
+    var origD=dragOffset.origDraw,d=drawings[selectedIdx];
+    var priceDelta=(yToPrice(pos.y)||0)-startPrice;
+    if(d.type==='hline') d.price=origD.price+priceDelta;
+    else if(d.type==='rect'){
+      d.p1=origD.p1+priceDelta;d.p2=origD.p2+priceDelta;
+      var lxDelta=xToTime(pos.x)-xToTime(startX);
+      d.lx1=origD.lx1+(lxDelta||0);d.lx2=origD.lx2+(lxDelta||0);
+    }
+    else if(d.type==='rr'){d.entry=origD.entry+priceDelta;d.sl=origD.sl+priceDelta}
+    else if(d.type==='channel'){
+      d.p1=origD.p1+priceDelta;d.p2=origD.p2+priceDelta;
+      var lxD=xToTime(pos.x)-xToTime(startX);
+      d.lx1=origD.lx1+(lxD||0);d.lx2=origD.lx2+(lxD||0);
+    }
+    renderAll();return;
+  }
+
+  if(!mouseDown||!currentDraw)return;
+  var lx=xToTime(pos.x),pr=yToPrice(pos.y);if(lx==null||pr==null)return;
+  if(currentDraw.type==='rect'){currentDraw.lx2=lx;currentDraw.p2=pr}
+  else if(currentDraw.type==='rr'){currentDraw.sl=pr}
+  else if(currentDraw.type==='channel'){currentDraw.lx2=lx;currentDraw.p2=pr}
+  renderAll();
+});
+
+document.getElementById('container').addEventListener('mouseup',function(e){
+  if(dragLimit){
+    if(bridge)bridge.onLimitPriceMoved(dragLimit,limitOrders[dragLimit].price);
+    dragLimit=null;
+    if(drawMode==='none'){canvas.style.pointerEvents='none';chart.applyOptions({handleScroll:true,handleScale:true})}
+    return;
+  }
+  if(drawMode==='none'&&mouseDown&&selectedIdx>=0){
+    mouseDown=false;selectedIdx=-1;dragOffset=null;
+    chart.applyOptions({handleScroll:true,handleScale:true});
+    canvas.style.pointerEvents='none';renderAll();return;
+  }
+  if(!mouseDown)return;
+  mouseDown=false;chart.applyOptions({handleScroll:true,handleScale:true});
+  if(currentDraw){drawings.push(currentDraw);currentDraw=null}
+  renderAll();
+});
+
+document.getElementById('container').addEventListener('contextmenu',function(e){e.preventDefault()});
+
+document.getElementById('container').addEventListener('wheel',function(e){
+  if(drawMode==='none'&&selectedIdx<0)return;
+  var pos=gmp(e),hi=hitTest(pos.x,pos.y);
+  if(hi>=0&&drawings[hi].type==='channel'){
+    drawings[hi].width=Math.max(5,drawings[hi].width+(e.deltaY>0?-3:3));
+    renderAll();e.preventDefault();
+  }
+},{passive:false});
+
+/* ================================================================
+   INIT
+   ================================================================ */
+initCanvas();
+window.addEventListener('resize',function(){
+  if(chart)chart.applyOptions({width:window.innerWidth,height:window.innerHeight});
+  resizeCanvas();
 });
 </script>
 </body>
