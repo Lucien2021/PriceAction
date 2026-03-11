@@ -1,0 +1,3 @@
+PySide6>=6.5
+akshare
+pandas>=2.0

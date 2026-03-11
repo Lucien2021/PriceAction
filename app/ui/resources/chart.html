@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1e222d; overflow: hidden; font-family: sans-serif; }
+  #chart { width: 100vw; height: 100vh; }
+  #info-overlay {
+    position: absolute; top: 8px; left: 12px; z-index: 10;
+    color: #d1d4dc; font-size: 12px; pointer-events: none;
+  }
+  #info-overlay span { margin-right: 12px; }
+  .up { color: #ef5350; }
+  .down { color: #26a69a; }
+</style>
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+<div id="info-overlay"></div>
+<div id="chart"></div>
+<script>
+let chart, candleSeries, volumeSeries, bridge;
+
+chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: { background: { type: 'solid', color: '#1e222d' }, textColor: '#d1d4dc' },
+    grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#2B2B43' },
+    timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false },
+    width: window.innerWidth,
+    height: window.innerHeight,
+});
+
+candleSeries = chart.addCandlestickSeries({
+    upColor: '#ef5350',
+    downColor: '#26a69a',
+    borderUpColor: '#ef5350',
+    borderDownColor: '#26a69a',
+    wickUpColor: '#ef5350',
+    wickDownColor: '#26a69a',
+});
+
+volumeSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'volume',
+});
+chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+// Crosshair data display
+chart.subscribeCrosshairMove(function(param) {
+    const overlay = document.getElementById('info-overlay');
+    if (!param || !param.time) { overlay.innerHTML = ''; return; }
+    const d = param.seriesData.get(candleSeries);
+    if (!d) { overlay.innerHTML = ''; return; }
+    const cls = d.close >= d.open ? 'up' : 'down';
+    overlay.innerHTML =
+        '<span>O: <b class="'+cls+'">'+d.open.toFixed(2)+'</b></span>' +
+        '<span>H: <b class="'+cls+'">'+d.high.toFixed(2)+'</b></span>' +
+        '<span>L: <b class="'+cls+'">'+d.low.toFixed(2)+'</b></span>' +
+        '<span>C: <b class="'+cls+'">'+d.close.toFixed(2)+'</b></span>';
+});
+
+new QWebChannel(qt.webChannelTransport, function(channel) {
+    bridge = channel.objects.bridge;
+    if (bridge) bridge.chartReady();
+});
+
+/* ---------- API called from Python ---------- */
+
+function setData(candlesJson, volumesJson) {
+    candleSeries.setData(JSON.parse(candlesJson));
+    volumeSeries.setData(JSON.parse(volumesJson));
+    chart.timeScale().fitContent();
+}
+
+function addCandle(candleJson, volumeJson) {
+    candleSeries.update(JSON.parse(candleJson));
+    volumeSeries.update(JSON.parse(volumeJson));
+    chart.timeScale().scrollToRealTime();
+}
+
+function setMarkers(markersJson) {
+    candleSeries.setMarkers(JSON.parse(markersJson));
+}
+
+function clearChart() {
+    candleSeries.setData([]);
+    volumeSeries.setData([]);
+}
+
+function drawHorizontalLine(price, color, lineWidth, lineStyle) {
+    return candleSeries.createPriceLine({
+        price: price,
+        color: color || '#FFD700',
+        lineWidth: lineWidth || 1,
+        lineStyle: lineStyle || 2,
+        axisLabelVisible: true,
+    });
+}
+
+function removeAllPriceLines() {
+    /* lightweight-charts v4 does not expose a list, so we re-create the series */
+}
+
+function fitContent() { chart.timeScale().fitContent(); }
+function scrollToRight() { chart.timeScale().scrollToRealTime(); }
+
+window.addEventListener('resize', function() {
+    chart.applyOptions({ width: window.innerWidth, height: window.innerHeight });
+});
+</script>
+</body>
+</html>
