@@ -84,16 +84,22 @@ class AKShareProvider:
         end_date: Optional[str],
         adjust: str,
     ) -> List[Candle]:
+        sd = self._to_intraday_date(start_date or "20100101", is_start=True)
+        ed = self._to_intraday_date(end_date or datetime.now().strftime("%Y%m%d"), is_start=False)
         df: pd.DataFrame = ak.stock_zh_a_hist_min_em(
             symbol=symbol.code,
+            start_date=sd,
+            end_date=ed,
             period=period,
             adjust=adjust,
         )
-        if start_date:
-            df = df[df.iloc[:, 0] >= start_date]
-        if end_date:
-            df = df[df.iloc[:, 0] <= end_date]
         return self._df_to_candles(df, daily=False)
+
+    @staticmethod
+    def _to_intraday_date(d: str, is_start: bool) -> str:
+        d = d.replace("-", "").replace(" ", "")[:8]
+        formatted = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        return f"{formatted} 09:30:00" if is_start else f"{formatted} 15:00:00"
 
     @staticmethod
     def _df_to_candles(df: pd.DataFrame, daily: bool) -> List[Candle]:

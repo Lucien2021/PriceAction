@@ -46,11 +46,19 @@ class ReplayEngine:
                 self._cache.save_candles(symbol, timeframe, candles)
         return len(self._cache.load_candles(symbol, timeframe))
 
-    def ensure_all_timeframes(self, symbol: Symbol, force: bool = False) -> Dict[Timeframe, int]:
+    def ensure_all_timeframes(
+        self,
+        symbol: Symbol,
+        force: bool = False,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[Timeframe, int]:
+        sd = start_date or "20100101"
+        ed = end_date or datetime.now().strftime("%Y%m%d")
         counts = {}
         for tf in TRAINING_TFS:
             try:
-                counts[tf] = self.ensure_data(symbol, tf, force=force)
+                counts[tf] = self.ensure_data(symbol, tf, start_date=sd, end_date=ed, force=force)
             except Exception:
                 counts[tf] = 0
         return counts
@@ -64,8 +72,16 @@ class ReplayEngine:
         timeframe: Timeframe,
         visible_bars: int = 60,
         future_bars: int = 120,
+        date_start: Optional[datetime] = None,
+        date_end: Optional[datetime] = None,
     ) -> Tuple[List[Candle], List[Candle]]:
         all_candles = self._cache.load_candles(symbol, timeframe)
+        if date_start or date_end:
+            all_candles = [
+                c for c in all_candles
+                if (date_start is None or c.timestamp >= date_start)
+                and (date_end is None or c.timestamp <= date_end)
+            ]
         total_needed = visible_bars + future_bars
         if len(all_candles) < total_needed:
             raise ValueError(

@@ -98,6 +98,25 @@ class CacheRepository:
             return (row[0], row[1])
         return None
 
+    def get_common_date_range(self, symbol: Symbol, timeframes: List[Timeframe]) -> Optional[tuple]:
+        """Return (max_of_mins, min_of_maxes) across all given TFs — the overlap."""
+        from datetime import datetime as _dt
+        latest_start = None
+        earliest_end = None
+        for tf in timeframes:
+            rng = self.get_date_range(symbol, tf)
+            if rng is None:
+                continue
+            s = _dt.fromisoformat(rng[0]) if isinstance(rng[0], str) else rng[0]
+            e = _dt.fromisoformat(rng[1]) if isinstance(rng[1], str) else rng[1]
+            if latest_start is None or s > latest_start:
+                latest_start = s
+            if earliest_end is None or e < earliest_end:
+                earliest_end = e
+        if latest_start and earliest_end and latest_start < earliest_end:
+            return (latest_start, earliest_end)
+        return None
+
     def list_cached_symbols(self) -> List[str]:
         rows = self._conn.execute("SELECT DISTINCT symbol FROM candle_cache").fetchall()
         return [r[0] for r in rows]

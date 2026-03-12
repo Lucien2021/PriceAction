@@ -397,15 +397,21 @@ class MainWindow(QMainWindow):
             return
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
         self._btn_download.setEnabled(False)
+
+        from datetime import datetime as _dt
+        sd = "20100101"
+        ed = _dt.now().strftime("%Y%m%d")
+
         results = {}
         for tf in TRAINING_TFS:
             self._lbl_status.setText(f"正在下载 {code} {tf.label} ...")
             QApplication.processEvents()
             try:
-                cnt = self._engine.ensure_data(symbol, tf, force=True)
+                cnt = self._engine.ensure_data(symbol, tf, start_date=sd, end_date=ed, force=True)
                 results[tf] = cnt
             except Exception as e:
                 results[tf] = f"失败: {e}"
+
         parts = [f"{tf.label}: {results[tf]}" for tf in TRAINING_TFS]
         self._lbl_status.setText(f"下载完成 {code} — " + " | ".join(parts))
         self._btn_download.setEnabled(True)
@@ -426,18 +432,23 @@ class MainWindow(QMainWindow):
         future_n = self._spn_future.value()
 
         try:
-            visible, future = self._engine.random_slice(symbol, primary_tf, visible_n, future_n)
+            visible, future = self._engine.random_slice(
+                symbol, primary_tf, visible_n, future_n,
+            )
         except ValueError as e:
             QMessageBox.warning(self, "数据不足", str(e))
             return
 
-        start_dt = visible[0].timestamp - timedelta(days=30)
-        end_dt = future[-1].timestamp + timedelta(days=30)
+        slice_start = visible[0].timestamp
+        slice_end = future[-1].timestamp
+        start_dt = slice_start - timedelta(days=60)
+        end_dt = slice_end + timedelta(days=60)
 
         self._tf_candles = {}
         for tf in TRAINING_TFS:
             all_c = self._engine.load_all(symbol, tf)
-            self._tf_candles[tf] = [c for c in all_c if start_dt <= c.timestamp <= end_dt]
+            tf_data = [c for c in all_c if start_dt <= c.timestamp <= end_dt]
+            self._tf_candles[tf] = tf_data
 
         self._time_cursor = visible[-1].timestamp
         self._active_tf = primary_tf
@@ -461,7 +472,15 @@ class MainWindow(QMainWindow):
         self._update_tf_buttons()
         self._update_bar_label()
         self._update_live_stats()
-        self._lbl_status.setText(f"训练开始: {code} {primary_tf.label}")
+
+        tf_info = []
+        for tf in TRAINING_TFS:
+            n = len(self._tf_candles.get(tf, []))
+            tf_info.append(f"{tf.label}:{n}")
+        self._lbl_status.setText(
+            f"训练开始: {code} | 日期: {slice_start.strftime('%Y-%m-%d')} ~ "
+            f"{slice_end.strftime('%Y-%m-%d')} | " + " ".join(tf_info)
+        )
 
     def _switch_timeframe(self, tf: Timeframe):
         if self._session.state not in (SessionState.RUNNING, SessionState.PAUSED):
@@ -502,6 +521,12 @@ class MainWindow(QMainWindow):
     def _update_tf_buttons(self):
         for t, btn in self._tf_btns.items():
             btn.setChecked(t == self._active_tf)
+            has_data = bool(self._tf_candles.get(t))
+            btn.setEnabled(has_data)
+            if not has_data:
+                btn.setToolTip(f"{t.label} 无数据")
+            else:
+                btn.setToolTip(f"{t.label}: {len(self._tf_candles[t])} 根K线")
 
     def _advance(self, steps: int = 1):
         if self._session.state != SessionState.RUNNING:
@@ -649,8 +674,12 @@ class MainWindow(QMainWindow):
         if not self._pending_limit or not self._trade_mode or self._session.position:
             return
         lo = self._pending_limit
+        price = lo["price"]
+        # K线必须实际触及限价线：low <= 限价 <= high
+        if not (candle.low <= price <= candle.high):
+            return
         triggered = False
-        if lo["direction"] == "long" and candle.low <= lo["price"]:
+        if lo["direction"] == "long":
             triggered = True
             pos = self._trade_mode.open_long(
                 self._spn_qty.value(),
@@ -658,8 +687,8 @@ class MainWindow(QMainWindow):
                 self._spn_tp.value() or None,
             )
             if pos:
-                pos.entry_price = lo["price"]
-        elif lo["direction"] == "short" and candle.high >= lo["price"]:
+                pos.entry_price = price
+        elif lo["direction"] == "short":
             triggered = True
             pos = self._trade_mode.open_short(
                 self._spn_qty.value(),
@@ -667,12 +696,12 @@ class MainWindow(QMainWindow):
                 self._spn_tp.value() or None,
             )
             if pos:
-                pos.entry_price = lo["price"]
+                pos.entry_price = price
         if triggered:
             self._chart.remove_limit_order(lo["id"])
             self._pending_limit = None
             self._update_position_display()
-            self._lbl_status.setText(f"限价委托成交 @ {lo['price']:.2f}")
+            self._lbl_status.setText(f"限价委托成交 @ {price:.2f}")
 
     # --- Predict ---
 
