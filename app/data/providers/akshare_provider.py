@@ -1,14 +1,50 @@
 from __future__ import annotations
 
 import datetime as _dt
+import logging
+import os
+import time
+import urllib.request
 from datetime import datetime, date
 from typing import List, Optional
+
+import requests as _requests
+from requests.adapters import HTTPAdapter as _HTTPAdapter
+from urllib3.util.retry import Retry as _Retry
 
 import akshare as ak
 import pandas as pd
 
 from app.domain.candle import Candle, Symbol, Timeframe, MarketType
 
+log = logging.getLogger(__name__)
+
+# ---- Disable proxy for stock-data API calls ----------------------------
+urllib.request.getproxies = lambda: {}
+for _k in list(os.environ):
+    if _k.lower() in ("http_proxy", "https_proxy", "all_proxy"):
+        del os.environ[_k]
+
+# ---- Inject HTTP-level retry into every requests.Session ---------------
+# akshare uses requests internally; give each session a retry adapter and
+# Connection:close so stale keep-alive sockets don't cause
+# RemoteDisconnected / ConnectionAborted errors.
+_http_retry = _Retry(
+    total=3, backoff_factor=1.0,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+)
+_orig_session_init = _requests.Session.__init__
+
+def _patched_session_init(self, *args, **kwargs):
+    _orig_session_init(self, *args, **kwargs)
+    adapter = _HTTPAdapter(max_retries=_http_retry)
+    self.mount("https://", adapter)
+    self.mount("http://", adapter)
+    self.headers.update({"Connection": "close"})
+
+_requests.Session.__init__ = _patched_session_init
+# ------------------------------------------------------------------------
 
 _PERIOD_MAP = {
     Timeframe.M1: "1",
@@ -21,9 +57,38 @@ _PERIOD_MAP = {
     Timeframe.MONTHLY: "monthly",
 }
 
+_MAX_RETRIES = 3
+_BASE_DELAY = 3.0
+_REQUEST_INTERVAL = 2.0
+
+
+def _retry(fn, *, retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY):
+    """Call *fn* with exponential-backoff retry on failure."""
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_err = exc
+            if attempt < retries:
+                wait = base_delay * (2 ** (attempt - 1))
+                log.warning("attempt %d/%d failed (%s), retry in %.1fs", attempt, retries, exc, wait)
+                time.sleep(wait)
+    raise last_err  # type: ignore[misc]
+
 
 class AKShareProvider:
     """Fetch A-share historical data via AKShare."""
+
+    def __init__(self):
+        self._last_request_ts: float = 0.0
+
+    def _throttle(self):
+        """Ensure minimum interval between consecutive API calls."""
+        elapsed = time.monotonic() - self._last_request_ts
+        if elapsed < _REQUEST_INTERVAL:
+            time.sleep(_REQUEST_INTERVAL - elapsed)
+        self._last_request_ts = time.monotonic()
 
     def fetch_candles(
         self,
@@ -72,7 +137,8 @@ class AKShareProvider:
             "end_date": end_date or datetime.now().strftime("%Y%m%d"),
         }
 
-        df: pd.DataFrame = ak.stock_zh_a_hist(**kwargs)
+        self._throttle()
+        df: pd.DataFrame = _retry(lambda: ak.stock_zh_a_hist(**kwargs))
         return self._df_to_candles(df, daily=True)
 
     def _fetch_intraday(
@@ -86,13 +152,15 @@ class AKShareProvider:
     ) -> List[Candle]:
         sd = self._to_intraday_date(start_date or "20100101", is_start=True)
         ed = self._to_intraday_date(end_date or datetime.now().strftime("%Y%m%d"), is_start=False)
-        df: pd.DataFrame = ak.stock_zh_a_hist_min_em(
+
+        self._throttle()
+        df: pd.DataFrame = _retry(lambda: ak.stock_zh_a_hist_min_em(
             symbol=symbol.code,
             start_date=sd,
             end_date=ed,
             period=period,
             adjust=adjust,
-        )
+        ))
         return self._df_to_candles(df, daily=False)
 
     @staticmethod

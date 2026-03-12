@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QLabel, QPushButton, QComboBox, QLineEdit,
@@ -20,7 +20,7 @@ from app.domain.candle import (
 from app.domain.market_rules import AShareRules
 from app.data.providers.akshare_provider import AKShareProvider
 from app.data.cache.repository import CacheRepository
-from app.replay.engine import ReplayEngine, TRAINING_TFS
+from app.replay.engine import ReplayEngine
 from app.replay.session import ReplaySession, SessionState, TrainingMode
 from app.training.predict_mode import PredictMode
 from app.training.trade_mode import TradeMode
@@ -28,6 +28,13 @@ from app.storage.models import get_connection
 from app.storage.stats_service import StatsService
 from app.ui.chart_bridge import ChartWidget
 from app.ui.review_panel import ReviewPanel
+
+_TF_OPTIONS = [
+    ("月线", Timeframe.MONTHLY),
+    ("日线", Timeframe.DAILY),
+    ("5分钟", Timeframe.M5),
+    ("1分钟", Timeframe.M1),
+]
 
 
 class MainWindow(QMainWindow):
@@ -47,12 +54,6 @@ class MainWindow(QMainWindow):
         self._predict_mode: Optional[PredictMode] = None
         self._trade_mode: Optional[TradeMode] = None
         self._pending_limit: Optional[dict] = None
-
-        # Multi-TF state
-        self._tf_candles: Dict[Timeframe, List[Candle]] = {}
-        self._active_tf: Timeframe = Timeframe.DAILY
-        self._time_cursor: Optional[datetime] = None
-        self._training_symbol: Optional[Symbol] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_auto_advance)
@@ -137,8 +138,14 @@ class MainWindow(QMainWindow):
         self._spn_future.setValue(120)
         row.addWidget(self._spn_future)
 
-        self._btn_download = QPushButton("下载数据(4周期)")
-        self._btn_download.setToolTip("下载月线/日线/5分钟/1分钟")
+        row.addWidget(QLabel("周期:"))
+        self._cmb_tf = QComboBox()
+        for label, _ in _TF_OPTIONS:
+            self._cmb_tf.addItem(label)
+        self._cmb_tf.setCurrentIndex(1)
+        row.addWidget(self._cmb_tf)
+
+        self._btn_download = QPushButton("下载数据")
         row.addWidget(self._btn_download)
 
         self._btn_start = QPushButton("开始训练")
@@ -282,24 +289,6 @@ class MainWindow(QMainWindow):
     def _build_playback_bar(self) -> QHBoxLayout:
         row = QHBoxLayout()
 
-        # TF switch buttons
-        row.addWidget(QLabel("周期:"))
-        self._tf_btns: Dict[Timeframe, QPushButton] = {}
-        tf_labels = {
-            Timeframe.MONTHLY: "月", Timeframe.DAILY: "日",
-            Timeframe.M5: "5m", Timeframe.M1: "1m",
-        }
-        for tf in TRAINING_TFS:
-            btn = QPushButton(tf_labels.get(tf, tf.label))
-            btn.setCheckable(True)
-            btn.setMinimumWidth(36)
-            btn.setMaximumWidth(50)
-            btn.clicked.connect(lambda checked, t=tf: self._switch_timeframe(t))
-            self._tf_btns[tf] = btn
-            row.addWidget(btn)
-        self._tf_btns[Timeframe.DAILY].setChecked(True)
-
-        row.addWidget(QLabel("  "))
         self._btn_next = QPushButton("▶|")
         self._btn_next5 = QPushButton("▶▶5")
         self._btn_play = QPushButton("▶ 播放")
@@ -387,6 +376,9 @@ class MainWindow(QMainWindow):
     # Handlers
     # ==================================================================
 
+    def _selected_tf(self) -> Timeframe:
+        return _TF_OPTIONS[self._cmb_tf.currentIndex()][1]
+
     def _on_chart_ready(self):
         self._chart_loaded = True
         self._lbl_status.setText("图表就绪")
@@ -396,24 +388,23 @@ class MainWindow(QMainWindow):
         if not code:
             return
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
+        tf = self._selected_tf()
+
         self._btn_download.setEnabled(False)
+        self._lbl_status.setText(f"正在下载 {code} {tf.label} ...")
+        QApplication.processEvents()
 
         from datetime import datetime as _dt
         sd = "20100101"
         ed = _dt.now().strftime("%Y%m%d")
 
-        results = {}
-        for tf in TRAINING_TFS:
-            self._lbl_status.setText(f"正在下载 {code} {tf.label} ...")
-            QApplication.processEvents()
-            try:
-                cnt = self._engine.ensure_data(symbol, tf, start_date=sd, end_date=ed, force=True)
-                results[tf] = cnt
-            except Exception as e:
-                results[tf] = f"失败: {e}"
+        try:
+            cnt = self._engine.ensure_data(symbol, tf, start_date=sd, end_date=ed, force=True)
+            self._lbl_status.setText(f"下载完成 {code} {tf.label}: {cnt} 根K线")
+        except Exception as e:
+            self._lbl_status.setText(f"下载失败 {code} {tf.label}: {e}")
+            QMessageBox.warning(self, "下载失败", f"{tf.label} 下载失败:\n{e}\n\n请稍后重试。")
 
-        parts = [f"{tf.label}: {results[tf]}" for tf in TRAINING_TFS]
-        self._lbl_status.setText(f"下载完成 {code} — " + " | ".join(parts))
         self._btn_download.setEnabled(True)
         self._refresh_data_table()
 
@@ -422,43 +413,24 @@ class MainWindow(QMainWindow):
         if not code:
             return
         symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
+        tf = self._selected_tf()
 
-        primary_tf = Timeframe.DAILY
-        if not self._cache.has_data(symbol, primary_tf):
-            QMessageBox.information(self, "提示", "请先下载数据")
+        if not self._cache.has_data(symbol, tf):
+            QMessageBox.information(self, "提示", f"请先下载 {tf.label} 数据")
             return
 
         visible_n = self._spn_visible.value()
         future_n = self._spn_future.value()
 
         try:
-            visible, future = self._engine.random_slice(
-                symbol, primary_tf, visible_n, future_n,
-            )
+            visible, future = self._engine.random_slice(symbol, tf, visible_n, future_n)
         except ValueError as e:
             QMessageBox.warning(self, "数据不足", str(e))
             return
 
-        slice_start = visible[0].timestamp
-        slice_end = future[-1].timestamp
-        start_dt = slice_start - timedelta(days=60)
-        end_dt = slice_end + timedelta(days=60)
-
-        self._tf_candles = {}
-        for tf in TRAINING_TFS:
-            all_c = self._engine.load_all(symbol, tf)
-            tf_data = [c for c in all_c if start_dt <= c.timestamp <= end_dt]
-            self._tf_candles[tf] = tf_data
-
-        self._time_cursor = visible[-1].timestamp
-        self._active_tf = primary_tf
-        self._training_symbol = symbol
-
         mode = TrainingMode.TRADE if self._rb_trade.isChecked() else TrainingMode.PREDICT
         self._session = ReplaySession()
-        vis_for_session = [c for c in self._tf_candles[primary_tf] if c.timestamp <= self._time_cursor]
-        fut_for_session = [c for c in self._tf_candles[primary_tf] if c.timestamp > self._time_cursor]
-        self._session.setup(symbol, primary_tf, mode, vis_for_session, fut_for_session)
+        self._session.setup(symbol, tf, mode, visible, future)
         self._session.start()
 
         self._trade_mode = TradeMode(self._session) if mode == TrainingMode.TRADE else None
@@ -466,67 +438,18 @@ class MainWindow(QMainWindow):
         self._btn_sell.setEnabled(self._rules.allows_short())
         self._btn_limit_sell.setEnabled(self._rules.allows_short())
 
-        self._chart.set_timeframe(primary_tf)
-        self._chart.set_candles(vis_for_session)
-        self._chart.set_ma_data(vis_for_session)
-        self._update_tf_buttons()
+        self._chart.set_timeframe(tf)
+        self._chart.set_candles(visible)
+        self._chart.set_ma_data(visible)
         self._update_bar_label()
         self._update_live_stats()
 
-        tf_info = []
-        for tf in TRAINING_TFS:
-            n = len(self._tf_candles.get(tf, []))
-            tf_info.append(f"{tf.label}:{n}")
         self._lbl_status.setText(
-            f"训练开始: {code} | 日期: {slice_start.strftime('%Y-%m-%d')} ~ "
-            f"{slice_end.strftime('%Y-%m-%d')} | " + " ".join(tf_info)
+            f"训练开始: {code} {tf.label} | "
+            f"{visible[0].timestamp.strftime('%Y-%m-%d')} ~ "
+            f"{future[-1].timestamp.strftime('%Y-%m-%d')} | "
+            f"可见{len(visible)} + 未来{len(future)}"
         )
-
-    def _switch_timeframe(self, tf: Timeframe):
-        if self._session.state not in (SessionState.RUNNING, SessionState.PAUSED):
-            return
-        if tf not in self._tf_candles or not self._tf_candles[tf]:
-            self._lbl_status.setText(f"{tf.label} 无数据")
-            return
-
-        position = self._session.position
-        closed_trades = list(self._session.closed_trades)
-        predictions = list(self._session.predictions)
-        state = self._session.state
-        started_at = self._session.started_at
-
-        candles = self._tf_candles[tf]
-        vis = [c for c in candles if c.timestamp <= self._time_cursor]
-        fut = [c for c in candles if c.timestamp > self._time_cursor]
-
-        self._session.visible_candles = vis
-        self._session.future_candles = fut
-        self._session.current_index = 0
-        self._session.timeframe = tf
-        self._session.position = position
-        self._session.closed_trades = closed_trades
-        self._session.predictions = predictions
-        self._session.state = state
-        self._session.started_at = started_at
-
-        self._active_tf = tf
-        self._chart.set_timeframe(tf)
-        self._chart.set_candles(vis)
-        self._chart.set_ma_data(vis)
-        self._refresh_markers()
-        self._update_tf_buttons()
-        self._update_bar_label()
-        self._lbl_status.setText(f"切换到 {tf.label}")
-
-    def _update_tf_buttons(self):
-        for t, btn in self._tf_btns.items():
-            btn.setChecked(t == self._active_tf)
-            has_data = bool(self._tf_candles.get(t))
-            btn.setEnabled(has_data)
-            if not has_data:
-                btn.setToolTip(f"{t.label} 无数据")
-            else:
-                btn.setToolTip(f"{t.label}: {len(self._tf_candles[t])} 根K线")
 
     def _advance(self, steps: int = 1):
         if self._session.state != SessionState.RUNNING:
@@ -549,7 +472,6 @@ class MainWindow(QMainWindow):
             self._check_limit_order(candle)
 
         if new_candles:
-            self._time_cursor = new_candles[-1].timestamp
             self._chart.add_ma_point(self._session.displayed_candles)
 
         self._refresh_markers()
@@ -766,7 +688,9 @@ class MainWindow(QMainWindow):
     def _update_bar_label(self):
         idx = self._session.current_index
         total = self._session.total_future_bars
-        self._lbl_bar_info.setText(f"K线: {idx}/{total}  [{self._active_tf.label}]")
+        tf = self._session.timeframe
+        label = tf.label if tf else ""
+        self._lbl_bar_info.setText(f"K线: {idx}/{total}  [{label}]")
 
     def _update_position_display(self):
         pos = self._session.position
