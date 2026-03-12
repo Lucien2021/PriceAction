@@ -43,6 +43,7 @@ class ChartWidget(QWebEngineView):
         self._is_ready = False
         self._pending_calls: list[str] = []
         self._timeframe: Timeframe = Timeframe.DAILY
+        self._last_close: float = 0.0
 
         self.setUrl(QUrl.fromLocalFile(str(_HTML_PATH.resolve())))
 
@@ -69,12 +70,20 @@ class ChartWidget(QWebEngineView):
     def set_candles(self, candles: List[Candle]) -> None:
         candle_data = [c.to_chart_dict(self._timeframe) for c in candles]
         volume_data = [c.to_volume_dict(self._timeframe) for c in candles]
+        extra = self._build_extra(candles)
         self._run_js(f"setData({json.dumps(candle_data)}, {json.dumps(volume_data)})")
+        self._run_js(f"setExtraData({json.dumps(extra)})")
+        if candles:
+            self._last_close = candles[-1].close
 
     def add_candle(self, candle: Candle) -> None:
         cd = json.dumps(candle.to_chart_dict(self._timeframe))
         vd = json.dumps(candle.to_volume_dict(self._timeframe))
+        ext = json.dumps(self._candle_extra(candle, self._last_close))
+        key = self._time_key(candle)
         self._run_js(f"addCandle({cd}, {vd})")
+        self._run_js(f"addExtraPoint('{key}',{ext})")
+        self._last_close = candle.close
 
     def set_markers(self, markers: list) -> None:
         self._run_js(f"setMarkers({json.dumps(markers, ensure_ascii=False)})")
@@ -105,6 +114,33 @@ class ChartWidget(QWebEngineView):
         else:
             t = int(c.timestamp.timestamp())
         self._run_js(f"addMAPoint({json.dumps({'time': t, 'value': round(avg, 2)})})")
+
+    def _time_key(self, c: Candle) -> str:
+        if self._timeframe.minutes >= Timeframe.DAILY.minutes:
+            return c.timestamp.strftime("%Y-%m-%d")
+        return str(int(c.timestamp.timestamp()))
+
+    _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+    def _candle_extra(self, c: Candle, prev_close: float) -> dict:
+        change = round(c.close - prev_close, 2) if prev_close else 0
+        change_pct = round(change / prev_close * 100, 2) if prev_close else 0
+        return {
+            "date": c.timestamp.strftime("%Y/%m/%d"),
+            "weekday": self._WEEKDAYS[c.timestamp.weekday()],
+            "time": c.timestamp.strftime("%H:%M") if self._timeframe.minutes < Timeframe.DAILY.minutes else "",
+            "volume": c.volume,
+            "turnover": c.turnover,
+            "change": change,
+            "changePct": change_pct,
+        }
+
+    def _build_extra(self, candles: List[Candle]) -> dict:
+        result = {}
+        for i, c in enumerate(candles):
+            prev_close = candles[i - 1].close if i > 0 else c.open
+            result[self._time_key(c)] = self._candle_extra(c, prev_close)
+        return result
 
     def clear(self) -> None:
         self._run_js("clearChart()")

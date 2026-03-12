@@ -8,8 +8,13 @@
   #container{position:relative;width:100vw;height:100vh}
   #chart{width:100%;height:100%}
   #draw-canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5}
-  #info-overlay{position:absolute;top:8px;left:12px;z-index:10;color:#d1d4dc;font-size:12px;pointer-events:none}
-  #info-overlay span{margin-right:12px}
+  #info-overlay{position:absolute;top:8px;left:12px;z-index:10;color:#d1d4dc;font-size:11px;
+    pointer-events:none;background:rgba(30,34,45,0.92);border:1px solid #3d3d5c;
+    border-radius:4px;padding:6px 10px;min-width:155px;line-height:1.7;display:none}
+  #info-overlay.visible{display:block}
+  .info-date{color:#808899;font-size:11px;border-bottom:1px solid #2B2B43;padding-bottom:3px;margin-bottom:2px}
+  .info-row{display:flex;justify-content:space-between;gap:10px}
+  .info-label{color:#808899}.info-val{font-weight:600;font-variant-numeric:tabular-nums}
   .up{color:#ef5350}.down{color:#26a69a}
   #toolbar{position:absolute;top:8px;right:12px;z-index:15;display:flex;gap:3px}
   #toolbar button{background:#2B2B43;color:#d1d4dc;border:1px solid #3d3d5c;padding:3px 7px;font-size:11px;cursor:pointer;border-radius:3px}
@@ -65,16 +70,30 @@ function initChart(){
 
   chart.subscribeCrosshairMove(function(p){
     var ov=document.getElementById('info-overlay');
-    if(!p||!p.time){ov.innerHTML='';return}
+    if(!p||!p.time){ov.classList.remove('visible');return}
     var d=p.seriesData.get(candleSeries);
-    if(!d){ov.innerHTML='';return}
+    if(!d){ov.classList.remove('visible');return}
     var c=d.close>=d.open?'up':'down';
+    var key=typeof p.time==='object'?(p.time.year+'-'+String(p.time.month).padStart(2,'0')+'-'+String(p.time.day).padStart(2,'0')):String(p.time);
+    var ex=_extraData[key]||{};
+    var dateStr=ex.date||key;
+    var wdStr=ex.weekday||'';
+    var timeStr=ex.time||'';
+    var chg=ex.change||0, chgPct=ex.changePct||0;
+    var chgCls=chg>=0?'up':'down';
+    var vol=ex.volume||0, to=ex.turnover||0;
     var maVal=p.seriesData.get(maSeries);
-    var maStr=maVal?' <span>MA20:<b>'+maVal.value.toFixed(2)+'</b></span>':'';
-    ov.innerHTML='<span>O:<b class="'+c+'">'+d.open.toFixed(2)+'</b></span>'+
-      '<span>H:<b class="'+c+'">'+d.high.toFixed(2)+'</b></span>'+
-      '<span>L:<b class="'+c+'">'+d.low.toFixed(2)+'</b></span>'+
-      '<span>C:<b class="'+c+'">'+d.close.toFixed(2)+'</b></span>'+maStr;
+    var h='<div class="info-date">'+dateStr+' '+wdStr+(timeStr?' '+timeStr:'')+'</div>';
+    h+='<div class="info-row"><span class="info-label">开盘</span><span class="info-val '+c+'">'+d.open.toFixed(2)+'</span></div>';
+    h+='<div class="info-row"><span class="info-label">收盘</span><span class="info-val '+c+'">'+d.close.toFixed(2)+'</span></div>';
+    h+='<div class="info-row"><span class="info-label">最高</span><span class="info-val '+c+'">'+d.high.toFixed(2)+'</span></div>';
+    h+='<div class="info-row"><span class="info-label">最低</span><span class="info-val '+c+'">'+d.low.toFixed(2)+'</span></div>';
+    h+='<div class="info-row"><span class="info-label">涨跌</span><span class="info-val '+chgCls+'">'+(chg>=0?'+':'')+chg.toFixed(2)+'</span></div>';
+    h+='<div class="info-row"><span class="info-label">涨幅</span><span class="info-val '+chgCls+'">'+(chgPct>=0?'+':'')+chgPct.toFixed(2)+'%</span></div>';
+    h+='<div class="info-row"><span class="info-label">成交量</span><span class="info-val">'+fmtVol(vol)+'</span></div>';
+    if(to>0) h+='<div class="info-row"><span class="info-label">成交额</span><span class="info-val">'+fmtVol(to)+'</span></div>';
+    if(maVal) h+='<div class="info-row"><span class="info-label">MA20</span><span class="info-val" style="color:#e0e040">'+maVal.value.toFixed(2)+'</span></div>';
+    ov.innerHTML=h;ov.classList.add('visible');
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(renderAll);
 }
@@ -84,6 +103,18 @@ new QWebChannel(qt.webChannelTransport,function(ch){
   bridge=ch.objects.bridge;
   if(bridge)bridge.chartReady();
 });
+
+/* ================================================================
+   EXTRA DATA (volume, turnover, change …)
+   ================================================================ */
+var _extraData={};
+function setExtraData(obj){_extraData=obj||{}}
+function addExtraPoint(key,obj){_extraData[key]=obj}
+function fmtVol(v){
+  if(v>=1e8)return(v/1e8).toFixed(2)+'亿';
+  if(v>=1e4)return(v/1e4).toFixed(2)+'万';
+  return v.toFixed(0);
+}
 
 /* ================================================================
    DATA API
@@ -202,7 +233,7 @@ function renderOne(d,isSel,isPrev){
     renderRR(d);
   }
   else if(d.type==='channel'){
-    renderChannel(d);
+    renderChannel(d,isSel);
   }
   ctx.restore();
 }
@@ -235,7 +266,7 @@ function renderRR(d){
   ctx.fillStyle='#ef5350';ctx.fillText('SL '+d.sl.toFixed(2)+' (Risk:'+risk.toFixed(2)+')',L+4,sY+(isL?14:-4));
 }
 
-function renderChannel(d){
+function renderChannel(d,isSel){
   var x1=timeToX(d.lx1),y1=priceToY(d.p1),x2=timeToX(d.lx2),y2=priceToY(d.p2);
   if(x1==null||x2==null||y1==null||y2==null)return;
   var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
@@ -252,6 +283,11 @@ function renderChannel(d){
   ctx.moveTo(x1+nx*w,y1+ny*w);ctx.lineTo(x2+nx*w,y2+ny*w);
   ctx.lineTo(x2-nx*w,y2-ny*w);ctx.lineTo(x1-nx*w,y1-ny*w);
   ctx.closePath();ctx.fill();
+  if(isSel){
+    ctx.setLineDash([]);ctx.fillStyle='#b39ddb';ctx.font='10px sans-serif';
+    var mx=(x1+x2)/2,my=(y1+y2)/2;
+    ctx.fillText('宽:'+w+'px',mx+4,my-6);
+  }
 }
 
 /* ================================================================
@@ -277,6 +313,12 @@ function hitTest(x,y){
       var cx1=timeToX(d.lx1),cy1=priceToY(d.p1),cx2=timeToX(d.lx2),cy2=priceToY(d.p2);
       if(cx1!=null&&cx2!=null&&cy1!=null&&cy2!=null){
         if(distToSeg(x,y,cx1,cy1,cx2,cy2)<12)return i;
+        var ddx=cx2-cx1,ddy=cy2-cy1,dlen=Math.sqrt(ddx*ddx+ddy*ddy);
+        if(dlen>2){
+          var nnx=-ddy/dlen,nny=ddx/dlen,ww=d.width||40;
+          if(distToSeg(x,y,cx1+nnx*ww,cy1+nny*ww,cx2+nnx*ww,cy2+nny*ww)<10)return i;
+          if(distToSeg(x,y,cx1-nnx*ww,cy1-nny*ww,cx2-nnx*ww,cy2-nny*ww)<10)return i;
+        }
       }
     }
   }
@@ -288,6 +330,24 @@ function distToSeg(px,py,ax,ay,bx,by){
   var cx=ax+t*dx,cy=ay+t*dy;
   return Math.sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
 }
+function hitChannelEdge(x,y){
+  for(var i=drawings.length-1;i>=0;i--){
+    var d=drawings[i];if(d.type!=='channel')continue;
+    var cx1=timeToX(d.lx1),cy1=priceToY(d.p1),cx2=timeToX(d.lx2),cy2=priceToY(d.p2);
+    if(cx1==null||cx2==null||cy1==null||cy2==null)continue;
+    var ddx=cx2-cx1,ddy=cy2-cy1,dlen=Math.sqrt(ddx*ddx+ddy*ddy);
+    if(dlen<2)continue;
+    var nnx=-ddy/dlen,nny=ddx/dlen,ww=d.width||40;
+    if(distToSeg(x,y,cx1+nnx*ww,cy1+nny*ww,cx2+nnx*ww,cy2+nny*ww)<10)return{idx:i,sign:1};
+    if(distToSeg(x,y,cx1-nnx*ww,cy1-nny*ww,cx2-nnx*ww,cy2-nny*ww)<10)return{idx:i,sign:-1};
+  }
+  return null;
+}
+function perpDistToLine(px,py,x1,y1,x2,y2){
+  var ddx=x2-x1,ddy=y2-y1,dlen=Math.sqrt(ddx*ddx+ddy*ddy);
+  if(dlen<1)return 0;
+  return Math.abs((ddy*px-ddx*py+x2*y1-y2*x1)/dlen);
+}
 function findLimitNear(y){
   for(var id in limitOrders){var ly=priceToY(limitOrders[id].price);if(ly!=null&&Math.abs(ly-y)<10)return id}
   return null;
@@ -297,6 +357,7 @@ function findLimitNear(y){
    MOUSE
    ================================================================ */
 var mouseDown=false,startX=0,startY=0,startPrice=0;
+var channelEdgeDrag=null;
 
 function gmp(e){var r=canvas.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}}
 
@@ -317,6 +378,13 @@ document.getElementById('container').addEventListener('mousedown',function(e){
   }
 
   if(drawMode==='none'){
+    var edgeHit=hitChannelEdge(pos.x,pos.y);
+    if(edgeHit){
+      channelEdgeDrag=edgeHit;selectedIdx=edgeHit.idx;
+      canvas.style.pointerEvents='auto';
+      chart.applyOptions({handleScroll:false,handleScale:false});
+      mouseDown=true;renderAll();e.preventDefault();return;
+    }
     var hi=hitTest(pos.x,pos.y);
     if(hi>=0){
       selectedIdx=hi;
@@ -359,10 +427,22 @@ document.getElementById('container').addEventListener('mousemove',function(e){
 
   if(drawMode==='none'&&!mouseDown){
     var nearLo=findLimitNear(pos.y);
+    var nearEdge=hitChannelEdge(pos.x,pos.y);
     var nearDr=hitTest(pos.x,pos.y);
-    if(nearLo||nearDr>=0){canvas.style.pointerEvents='auto';canvas.style.cursor=nearLo?'ns-resize':'grab'}
+    if(nearLo){canvas.style.pointerEvents='auto';canvas.style.cursor='ns-resize'}
+    else if(nearEdge){canvas.style.pointerEvents='auto';canvas.style.cursor='ew-resize'}
+    else if(nearDr>=0){canvas.style.pointerEvents='auto';canvas.style.cursor='grab'}
     else{canvas.style.pointerEvents='none';canvas.style.cursor='default'}
     return;
+  }
+
+  if(drawMode==='none'&&mouseDown&&channelEdgeDrag){
+    var cd=drawings[channelEdgeDrag.idx];
+    var cx1=timeToX(cd.lx1),cy1=priceToY(cd.p1),cx2=timeToX(cd.lx2),cy2=priceToY(cd.p2);
+    if(cx1!=null&&cy1!=null&&cx2!=null&&cy2!=null){
+      cd.width=Math.max(5,Math.round(perpDistToLine(pos.x,pos.y,cx1,cy1,cx2,cy2)));
+    }
+    renderAll();return;
   }
 
   if(drawMode==='none'&&mouseDown&&selectedIdx>=0&&dragOffset){
@@ -399,8 +479,8 @@ document.getElementById('container').addEventListener('mouseup',function(e){
     if(drawMode==='none'){canvas.style.pointerEvents='none';chart.applyOptions({handleScroll:true,handleScale:true})}
     return;
   }
-  if(drawMode==='none'&&mouseDown&&selectedIdx>=0){
-    mouseDown=false;selectedIdx=-1;dragOffset=null;
+  if(drawMode==='none'&&mouseDown&&(selectedIdx>=0||channelEdgeDrag)){
+    mouseDown=false;selectedIdx=-1;dragOffset=null;channelEdgeDrag=null;
     chart.applyOptions({handleScroll:true,handleScale:true});
     canvas.style.pointerEvents='none';renderAll();return;
   }
@@ -413,10 +493,9 @@ document.getElementById('container').addEventListener('mouseup',function(e){
 document.getElementById('container').addEventListener('contextmenu',function(e){e.preventDefault()});
 
 document.getElementById('container').addEventListener('wheel',function(e){
-  if(drawMode==='none'&&selectedIdx<0)return;
   var pos=gmp(e),hi=hitTest(pos.x,pos.y);
   if(hi>=0&&drawings[hi].type==='channel'){
-    drawings[hi].width=Math.max(5,drawings[hi].width+(e.deltaY>0?-3:3));
+    drawings[hi].width=Math.max(5,drawings[hi].width+(e.deltaY>0?-5:5));
     renderAll();e.preventDefault();
   }
 },{passive:false});
