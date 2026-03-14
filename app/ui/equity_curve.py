@@ -212,8 +212,8 @@ class EquityCurveWidget(QWidget):
                 x = self._to_x(i)
                 if x < _MARGIN_L or x > w - _MARGIN_R:
                     continue
-                t = self._data[i].get("created_at") or self._data[i].get("exit_time") or ""
-                label = t[:10] if len(t) >= 10 else t
+                sym = self._data[i].get("symbol") or ""
+                label = f"#{i+1} {sym}"
                 p.setPen(QPen(_TEXT))
                 p.drawText(QPointF(x - 20, h - 8), label)
 
@@ -261,7 +261,7 @@ class EquityCurveWidget(QWidget):
                 if snap and Path(snap).exists():
                     pix = QPixmap(snap)
                     if not pix.isNull():
-                        viewer = SnapshotPopup(pix, self._format_trade_title(data), self.window())
+                        viewer = SnapshotPopup(pix, self._format_trade_title(data, self._hover_idx), self.window())
                         viewer.exec()
                 return
             self._dragging = True
@@ -311,7 +311,7 @@ class EquityCurveWidget(QWidget):
         data = self._data[idx]
         if self._tooltip_widget is None:
             self._tooltip_widget = _TradeTooltip()
-        self._tooltip_widget.set_data(data)
+        self._tooltip_widget.set_data(data, idx)
         self._tooltip_widget.move(global_pos.x() + 16, global_pos.y() + 16)
         self._tooltip_widget.show()
 
@@ -320,10 +320,11 @@ class EquityCurveWidget(QWidget):
             self._tooltip_widget.hide()
 
     @staticmethod
-    def _format_trade_title(data: dict) -> str:
+    def _format_trade_title(data: dict, idx: int = 0) -> str:
         d = "做多" if data.get("direction") == "long" else "做空"
         pnl = data.get("pnl") or 0
-        return f"{data.get('exit_time', '')[:16]} {d} {pnl:+.2f}"
+        sym = data.get("symbol") or ""
+        return f"#{idx+1} {sym} {d} {pnl:+.2f}"
 
 
 class _TradeTooltip(QWidget):
@@ -353,7 +354,7 @@ class _TradeTooltip(QWidget):
         self._lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_hint)
 
-    def set_data(self, data: dict):
+    def set_data(self, data: dict, idx: int = 0):
         d = "做多" if data.get("direction") == "long" else "做空"
         pnl = data.get("pnl") or 0
         pnl_pct = data.get("pnl_pct") or 0
@@ -372,7 +373,7 @@ class _TradeTooltip(QWidget):
         tp = data.get("take_profit")
 
         lines = [
-            f"<b>{t[:16]}</b>  {sym} {tf}",
+            f"<b>#{idx+1}</b> {sym} {tf}  <span style='color:#808899'>{t[:16]}</span>",
             f"{d}  {ep:.2f} -> {xp:.2f}  x{qty}",
             f"盈亏: <b style='color:{('#26a69a' if pnl>=0 else '#ef5350')}'>{pnl:+.2f} ({pnl_pct:+.2f}%){r_str}</b>",
             f"出场: {reason}  Setup: {setup}",

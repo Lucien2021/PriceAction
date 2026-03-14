@@ -263,10 +263,11 @@ class StatsService:
         for snap in snapshots:
             self._conn.execute(
                 "INSERT INTO equity_snapshots "
-                "(session_id, created_at, equity_before, equity_after, is_reset, bankruptcy_count) "
-                "VALUES (?,?,?,?,?,?)",
+                "(session_id, trade_id, created_at, equity_before, equity_after, is_reset, bankruptcy_count) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (
                     session_id,
+                    snap.trade_id or None,
                     snap.timestamp.isoformat() if snap.timestamp else datetime.now().isoformat(),
                     snap.equity_before,
                     snap.equity_after,
@@ -279,12 +280,12 @@ class StatsService:
     def get_equity_snapshots(self, session_id: Optional[str] = None) -> list:
         if session_id:
             rows = self._conn.execute(
-                "SELECT * FROM equity_snapshots WHERE session_id=? ORDER BY created_at",
+                "SELECT * FROM equity_snapshots WHERE session_id=? ORDER BY id",
                 (session_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM equity_snapshots ORDER BY created_at"
+                "SELECT * FROM equity_snapshots ORDER BY id"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -297,12 +298,12 @@ class StatsService:
     def get_last_equity(self) -> float:
         """Return the most recent equity_after across all sessions."""
         row = self._conn.execute(
-            "SELECT equity_after FROM equity_snapshots ORDER BY created_at DESC LIMIT 1"
+            "SELECT equity_after FROM equity_snapshots ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return row["equity_after"] if row else 100000.0
 
     def get_full_equity_curve(self) -> List[Dict[str, Any]]:
-        """Get all equity points joined with trade details for the curve."""
+        """Get all equity points joined with trade details, ordered by actual training sequence."""
         rows = self._conn.execute(
             "SELECT e.id, e.session_id, e.created_at, e.equity_before, e.equity_after, "
             "       e.is_reset, e.bankruptcy_count, "
@@ -313,9 +314,10 @@ class StatsService:
             "       s.symbol, s.timeframe, s.setup_type "
             "FROM equity_snapshots e "
             "LEFT JOIN trades t ON e.session_id = t.session_id "
-            "    AND t.exit_time = e.created_at "
+            "    AND (t.position_id = e.trade_id "
+            "         OR (e.trade_id IS NULL AND t.exit_time = e.created_at)) "
             "LEFT JOIN sessions s ON e.session_id = s.id "
-            "ORDER BY e.created_at"
+            "ORDER BY e.id"
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -340,8 +342,39 @@ class StatsService:
 
     def get_session_trades(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM trades WHERE session_id=? ORDER BY entry_bar_index",
+            "SELECT * FROM trades WHERE session_id=? ORDER BY id",
             (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_all_trades_with_session(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        scenario_tag: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return all trades joined with session info, ordered by t.id DESC (newest first)."""
+        conditions: List[str] = []
+        params: list = []
+        if symbol:
+            conditions.append("s.symbol = ?")
+            params.append(symbol)
+        if timeframe:
+            conditions.append("s.timeframe = ?")
+            params.append(timeframe)
+        if setup_type:
+            conditions.append("s.setup_type = ?")
+            params.append(setup_type)
+        if scenario_tag:
+            conditions.append("s.scenario_tag = ?")
+            params.append(scenario_tag)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = self._conn.execute(
+            f"SELECT t.*, s.symbol, s.timeframe, s.setup_type, s.scenario_tag "
+            f"FROM trades t JOIN sessions s ON t.session_id = s.id "
+            f"{where} ORDER BY t.id DESC",
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -395,7 +428,7 @@ class StatsService:
         ).fetchone()[0]
 
         trade_rows = self._conn.execute(
-            f"SELECT t.* FROM trades t JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.entry_time",
+            f"SELECT t.* FROM trades t JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.id",
             params,
         ).fetchall()
         trades = [dict(row) for row in trade_rows]
@@ -443,7 +476,7 @@ class StatsService:
         where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
         rows = self._conn.execute(
             f"SELECT t.exit_time, t.pnl, t.pnl_pct, t.r_multiple FROM trades t "
-            f"JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.exit_time",
+            f"JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.id",
             params,
         ).fetchall()
         cumulative = 0.0
@@ -462,7 +495,7 @@ class StatsService:
         return result
 
     def get_rolling_win_rate(self, window: int = 20) -> List[Dict[str, Any]]:
-        rows = self._conn.execute("SELECT exit_time, pnl FROM trades ORDER BY exit_time").fetchall()
+        rows = self._conn.execute("SELECT exit_time, pnl FROM trades ORDER BY id").fetchall()
         bucket: List[int] = []
         result: List[Dict[str, Any]] = []
         for row in rows:

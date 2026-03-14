@@ -503,45 +503,43 @@ class ReviewPanel(QWidget):
 
         self._trade_table.setRowCount(0)
         self._trade_id_map.clear()
-        for sess in self._stats.get_all_sessions():
-            if sym and sess["symbol"] != sym:
-                continue
-            if tf and sess["timeframe"] != tf:
-                continue
-            if setup_f and sess.get("setup_type") != setup_f:
-                continue
-            if scenario_f and sess.get("scenario_tag") != scenario_f:
-                continue
-            for t in self._stats.get_session_trades(sess["id"]):
-                row = self._trade_table.rowCount()
-                self._trade_table.insertRow(row)
-                self._trade_id_map[row] = t["id"]
-                tags = ", ".join(json.loads(t.get("tags", "[]") or "[]"))
-                mtags = ", ".join(json.loads(t.get("mistake_tags", "[]") or "[]"))
-                vals = [
-                    (t.get("entry_time") or "")[:19],
-                    sess.get("symbol", ""), sess.get("timeframe", ""),
-                    "做多" if t.get("direction") == "long" else "做空",
-                    sess.get("setup_type", ""),
-                    f"{(t.get('pnl') or 0):+.2f}",
-                    f"{(t.get('pnl_pct') or 0):+.2f}%",
-                    f"{t['r_multiple']:.2f}" if t.get("r_multiple") is not None else "-",
-                    t.get("exit_reason", ""),
-                    str(t.get("execution_score") or 0),
-                    mtags, tags,
-                    t.get("entry_reason", ""),
-                    t.get("exit_review", ""),
-                ]
-                for col, v in enumerate(vals):
-                    item = QTableWidgetItem(v)
-                    if col == 5:
-                        pnl = t.get("pnl") or 0
-                        item.setForeground(
-                            Qt.GlobalColor.red if pnl > 0
-                            else Qt.GlobalColor.green if pnl < 0
-                            else Qt.GlobalColor.gray
-                        )
-                    self._trade_table.setItem(row, col, item)
+
+        all_trades = self._stats.get_all_trades_with_session(
+            symbol=sym or None,
+            timeframe=tf or None,
+            setup_type=setup_f or None,
+            scenario_tag=scenario_f or None,
+        )
+        for t in all_trades:
+            row = self._trade_table.rowCount()
+            self._trade_table.insertRow(row)
+            self._trade_id_map[row] = t["id"]
+            tags = ", ".join(json.loads(t.get("tags", "[]") or "[]"))
+            mtags = ", ".join(json.loads(t.get("mistake_tags", "[]") or "[]"))
+            vals = [
+                (t.get("entry_time") or "")[:19],
+                t.get("symbol", ""), t.get("timeframe", ""),
+                "做多" if t.get("direction") == "long" else "做空",
+                t.get("setup_type", ""),
+                f"{(t.get('pnl') or 0):+.2f}",
+                f"{(t.get('pnl_pct') or 0):+.2f}%",
+                f"{t['r_multiple']:.2f}" if t.get("r_multiple") is not None else "-",
+                t.get("exit_reason", ""),
+                str(t.get("execution_score") or 0),
+                mtags, tags,
+                t.get("entry_reason", ""),
+                t.get("exit_review", ""),
+            ]
+            for col, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if col == 5:
+                    pnl = t.get("pnl") or 0
+                    item.setForeground(
+                        Qt.GlobalColor.red if pnl > 0
+                        else Qt.GlobalColor.green if pnl < 0
+                        else Qt.GlobalColor.gray
+                    )
+                self._trade_table.setItem(row, col, item)
 
     def _on_trade_selected(self, row, _col, _prev_row, _prev_col):
         if row < 0 or row not in self._trade_id_map:

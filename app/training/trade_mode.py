@@ -274,7 +274,8 @@ class TradeMode:
             equity_before=trade.equity_before,
             equity_after=trade.equity_after,
             bankruptcy_count=self._bankruptcy_count,
-            timestamp=trade.exit_time,
+            timestamp=datetime.now(),
+            trade_id=trade.position_id,
         ))
 
     def _check_bankruptcy(self, trade: ClosedTrade) -> None:
@@ -289,7 +290,7 @@ class TradeMode:
                 equity_after=INITIAL_CAPITAL,
                 is_reset=True,
                 bankruptcy_count=self._bankruptcy_count,
-                timestamp=trade.exit_time,
+                timestamp=datetime.now(),
             ))
 
     # ------------------------------------------------------------------
