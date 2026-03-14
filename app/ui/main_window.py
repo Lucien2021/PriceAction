@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -276,8 +278,34 @@ class MainWindow(QMainWindow):
         root.addLayout(self._build_toolbar())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self._left_stack = QStackedWidget()
         self._chart = ChartWidget()
-        splitter.addWidget(self._chart)
+        self._left_stack.addWidget(self._chart)
+
+        self._snapshot_page = QWidget()
+        snap_layout = QVBoxLayout(self._snapshot_page)
+        snap_layout.setContentsMargins(0, 0, 0, 0)
+        snap_top = QHBoxLayout()
+        self._btn_back_to_chart = QPushButton("返回图表")
+        self._btn_back_to_chart.setMinimumHeight(28)
+        self._btn_back_to_chart.clicked.connect(self._hide_snapshot_view)
+        snap_top.addWidget(self._btn_back_to_chart)
+        self._lbl_snap_title = QLabel("")
+        self._lbl_snap_title.setStyleSheet("color:#d1d4dc;font-size:13px;")
+        snap_top.addWidget(self._lbl_snap_title)
+        snap_top.addStretch()
+        snap_layout.addLayout(snap_top)
+        self._snapshot_scroll = QScrollArea()
+        self._snapshot_scroll.setWidgetResizable(True)
+        self._snapshot_scroll.setStyleSheet("background:#1e222d;")
+        self._snapshot_image_label = QLabel()
+        self._snapshot_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._snapshot_scroll.setWidget(self._snapshot_image_label)
+        snap_layout.addWidget(self._snapshot_scroll)
+        self._left_stack.addWidget(self._snapshot_page)
+
+        splitter.addWidget(self._left_stack)
 
         right_tabs = QTabWidget()
         right_tabs.setMinimumWidth(360)
@@ -585,6 +613,7 @@ class MainWindow(QMainWindow):
         self._chart.chart_ready.connect(self._on_chart_ready)
         self._chart.limit_price_changed.connect(self._on_limit_price_dragged)
         self._chart.trade_line_changed.connect(self._on_trade_line_dragged)
+        self._review_panel.snapshot_to_chart.connect(self._show_snapshot_in_chart)
         self._btn_download.clicked.connect(self._on_download)
         self._btn_start.clicked.connect(self._on_start_session)
         self._btn_finish.clicked.connect(self._on_finish_session)
@@ -1286,6 +1315,30 @@ class MainWindow(QMainWindow):
         tf = self._session.timeframe or Timeframe.DAILY
         markers = self._chart.build_trade_markers(self._session.closed_trades, tf)
         self._chart.set_markers(markers)
+
+    # ------------------------------------------------------------------
+    # Snapshot in chart area
+    # ------------------------------------------------------------------
+
+    def _show_snapshot_in_chart(self, snapshot_path: str):
+        if not snapshot_path or not Path(snapshot_path).exists():
+            return
+        pix = QPixmap(snapshot_path)
+        if pix.isNull():
+            return
+        vw = self._snapshot_scroll.viewport().width()
+        vh = self._snapshot_scroll.viewport().height()
+        scaled = pix.scaled(
+            max(vw, 600), max(vh, 400),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._snapshot_image_label.setPixmap(scaled)
+        self._lbl_snap_title.setText("复盘截图 (点击[返回图表]恢复)")
+        self._left_stack.setCurrentIndex(1)
+
+    def _hide_snapshot_view(self):
+        self._left_stack.setCurrentIndex(0)
 
     # ==================================================================
 

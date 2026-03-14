@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -39,8 +40,92 @@ PA_TAGS = [
 ]
 
 
+class SnapshotViewer(QDialog):
+    """Resizable floating dialog for viewing trade snapshots with zoom."""
+
+    def __init__(self, pixmap: QPixmap, title: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title or "交易截图")
+        self.setMinimumSize(600, 400)
+        self.resize(900, 600)
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 4, 8, 4)
+        self._zoom = 1.0
+        self._btn_zoom_in = QPushButton("+")
+        self._btn_zoom_in.setFixedSize(32, 28)
+        self._btn_zoom_in.clicked.connect(lambda: self._set_zoom(self._zoom + 0.2))
+        self._btn_zoom_out = QPushButton("-")
+        self._btn_zoom_out.setFixedSize(32, 28)
+        self._btn_zoom_out.clicked.connect(lambda: self._set_zoom(self._zoom - 0.2))
+        self._btn_zoom_fit = QPushButton("适应")
+        self._btn_zoom_fit.setFixedSize(48, 28)
+        self._btn_zoom_fit.clicked.connect(self._fit)
+        self._btn_zoom_100 = QPushButton("100%")
+        self._btn_zoom_100.setFixedSize(48, 28)
+        self._btn_zoom_100.clicked.connect(lambda: self._set_zoom(1.0))
+        self._lbl_zoom = QLabel("100%")
+        toolbar.addWidget(self._btn_zoom_out)
+        toolbar.addWidget(self._btn_zoom_in)
+        toolbar.addWidget(self._btn_zoom_fit)
+        toolbar.addWidget(self._btn_zoom_100)
+        toolbar.addWidget(self._lbl_zoom)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_label = QLabel()
+        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setWidget(self._img_label)
+        layout.addWidget(self._scroll)
+
+        self._original_pixmap = pixmap
+        self._fit()
+
+    def _set_zoom(self, z: float):
+        self._zoom = max(0.2, min(5.0, z))
+        self._lbl_zoom.setText(f"{int(self._zoom * 100)}%")
+        w = int(self._original_pixmap.width() * self._zoom)
+        h = int(self._original_pixmap.height() * self._zoom)
+        scaled = self._original_pixmap.scaled(
+            w, h, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._img_label.setPixmap(scaled)
+        self._img_label.resize(scaled.size())
+
+    def _fit(self):
+        vw = self._scroll.viewport().width() - 20
+        vh = self._scroll.viewport().height() - 20
+        pw = self._original_pixmap.width()
+        ph = self._original_pixmap.height()
+        if pw == 0 or ph == 0:
+            return
+        z = min(vw / pw, vh / ph, 3.0)
+        self._set_zoom(z)
+
+    def wheelEvent(self, event: QWheelEvent):
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self._set_zoom(self._zoom + 0.1)
+        elif delta < 0:
+            self._set_zoom(self._zoom - 0.1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+
 class ReviewPanel(QWidget):
     session_selected = Signal(str)
+    snapshot_to_chart = Signal(str)
 
     def __init__(self, stats_service: StatsService, parent=None):
         super().__init__(parent)
@@ -144,11 +229,32 @@ class ReviewPanel(QWidget):
         detail_layout = QVBoxLayout(detail_widget)
         detail_layout.setContentsMargins(4, 4, 4, 4)
 
-        self._trade_snapshot_label = QLabel("选中交易后在此显示截图")
-        self._trade_snapshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._trade_snapshot_label.setMinimumHeight(200)
-        self._trade_snapshot_label.setStyleSheet("background:#1e222d;color:#808899;border:1px solid #3d3d5c;")
-        detail_layout.addWidget(self._trade_snapshot_label)
+        snap_group = QGroupBox("交易截图")
+        snap_lay = QVBoxLayout(snap_group)
+        self._trade_snapshot_thumb = QLabel("选中交易后显示缩略图")
+        self._trade_snapshot_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._trade_snapshot_thumb.setFixedHeight(120)
+        self._trade_snapshot_thumb.setStyleSheet(
+            "background:#1e222d;color:#808899;border:1px solid #3d3d5c;cursor:pointer;"
+        )
+        self._trade_snapshot_thumb.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._trade_snapshot_thumb.mousePressEvent = self._on_snapshot_thumb_click
+        snap_lay.addWidget(self._trade_snapshot_thumb)
+
+        snap_btns = QHBoxLayout()
+        self._btn_snap_popup = QPushButton("悬浮放大查看")
+        self._btn_snap_popup.setMinimumHeight(26)
+        self._btn_snap_popup.clicked.connect(self._open_snapshot_popup)
+        self._btn_snap_chart = QPushButton("显示到左侧图表区")
+        self._btn_snap_chart.setMinimumHeight(26)
+        self._btn_snap_chart.clicked.connect(self._show_snapshot_in_chart)
+        snap_btns.addWidget(self._btn_snap_popup)
+        snap_btns.addWidget(self._btn_snap_chart)
+        snap_lay.addLayout(snap_btns)
+        detail_layout.addWidget(snap_group)
+
+        self._current_snapshot_path = ""
+        self._current_snapshot_pixmap: Optional[QPixmap] = None
 
         tag_group = QGroupBox("标签与执行复盘")
         tg = QVBoxLayout(tag_group)
@@ -444,22 +550,50 @@ class ReviewPanel(QWidget):
         self._txt_exit_review.setPlainText(rec["exit_review"] or "")
 
         snap = rec["snapshot_path"] or ""
+        self._current_snapshot_path = snap
+        self._current_snapshot_pixmap = None
         if snap and Path(snap).exists():
             pix = QPixmap(snap)
             if not pix.isNull():
-                self._trade_snapshot_label.setPixmap(
-                    pix.scaledToWidth(
-                        max(self._trade_snapshot_label.width(), 400),
+                self._current_snapshot_pixmap = pix
+                self._trade_snapshot_thumb.setPixmap(
+                    pix.scaledToHeight(
+                        110,
                         Qt.TransformationMode.SmoothTransformation,
                     )
                 )
-                self._trade_snapshot_label.setText("")
+                self._trade_snapshot_thumb.setText("")
             else:
-                self._trade_snapshot_label.setText("截图加载失败")
-                self._trade_snapshot_label.setPixmap(QPixmap())
+                self._trade_snapshot_thumb.setText("截图加载失败")
+                self._trade_snapshot_thumb.setPixmap(QPixmap())
         else:
-            self._trade_snapshot_label.setText("暂无截图")
-            self._trade_snapshot_label.setPixmap(QPixmap())
+            self._trade_snapshot_thumb.setText("暂无截图 (点击缩略图或按钮查看)")
+            self._trade_snapshot_thumb.setPixmap(QPixmap())
+
+    def _on_snapshot_thumb_click(self, event):
+        self._open_snapshot_popup()
+
+    def _open_snapshot_popup(self):
+        pix = self._current_snapshot_pixmap
+        if pix is None or pix.isNull():
+            QMessageBox.information(self, "提示", "当前交易暂无截图")
+            return
+        row = self._trade_table.currentRow()
+        title = ""
+        if row >= 0:
+            time_item = self._trade_table.item(row, 0)
+            dir_item = self._trade_table.item(row, 3)
+            pnl_item = self._trade_table.item(row, 5)
+            if time_item and dir_item and pnl_item:
+                title = f"{time_item.text()} {dir_item.text()} {pnl_item.text()}"
+        viewer = SnapshotViewer(pix, title, self)
+        viewer.exec()
+
+    def _show_snapshot_in_chart(self):
+        if not self._current_snapshot_path or not Path(self._current_snapshot_path).exists():
+            QMessageBox.information(self, "提示", "当前交易暂无截图")
+            return
+        self.snapshot_to_chart.emit(self._current_snapshot_path)
 
     def _on_tag_toggle(self, tag: str, checked: bool):
         row = self._trade_table.currentRow()
