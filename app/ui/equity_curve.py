@@ -3,16 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
-    QFontMetrics,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
+    QWheelEvent,
+    QMouseEvent,
 )
 from PySide6.QtWidgets import (
     QDialog,
@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -40,9 +39,13 @@ _MARGIN_R = 20
 _MARGIN_T = 30
 _MARGIN_B = 40
 
+_MIN_PX_PER_POINT = 6
+_MAX_PX_PER_POINT = 120
+_DEFAULT_PX_PER_POINT = 24
+
 
 class EquityCurveWidget(QWidget):
-    """Interactive equity curve with hover tooltips showing trade info + snapshot."""
+    """Interactive equity curve with zoom, pan, hover tooltips and snapshot click."""
     point_clicked = Signal(int)
 
     def __init__(self, parent=None):
@@ -54,60 +57,108 @@ class EquityCurveWidget(QWidget):
         self._hover_idx = -1
         self._tooltip_widget: Optional[_TradeTooltip] = None
 
+        self._px_per_pt = _DEFAULT_PX_PER_POINT
+        self._offset_x = 0.0
+        self._dragging = False
+        self._drag_start_x = 0.0
+        self._drag_start_offset = 0.0
+
     def set_data(self, points: List[dict]):
         self._data = points
         self._pts.clear()
         self._hover_idx = -1
+        n = len(self._data)
+        if n > 1:
+            needed = (n - 1) * self._px_per_pt + _MARGIN_L + _MARGIN_R
+            visible = self.width()
+            if needed > visible:
+                self._offset_x = max(0, needed - visible)
+            else:
+                self._offset_x = 0
+        else:
+            self._offset_x = 0
         self.update()
 
-    def paintEvent(self, event):
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def _chart_width(self) -> float:
+        n = len(self._data)
+        return max((n - 1) * self._px_per_pt, self.width() - _MARGIN_L - _MARGIN_R)
+
+    def _max_offset(self) -> float:
+        total = self._chart_width() + _MARGIN_L + _MARGIN_R
+        return max(0.0, total - self.width())
+
+    def _clamp_offset(self):
+        self._offset_x = max(0.0, min(self._offset_x, self._max_offset()))
+
+    def _to_x(self, i: int) -> float:
+        return _MARGIN_L + i * self._px_per_pt - self._offset_x
+
+    def _to_y(self, val: float, eq_min: float, eq_max: float) -> float:
+        h = self.height()
+        chart_h = h - _MARGIN_T - _MARGIN_B
+        return _MARGIN_T + (1.0 - (val - eq_min) / (eq_max - eq_min)) * chart_h
+
+    def _eq_range(self):
         if not self._data:
-            p = QPainter(self)
-            p.fillRect(self.rect(), _BG)
+            return 99000.0, 101000.0
+        equities = [pt.get("equity_after", 100000) for pt in self._data]
+        lo, hi = min(equities), max(equities)
+        margin = max((hi - lo) * 0.05, 500)
+        return lo - margin, hi + margin
+
+    # ------------------------------------------------------------------
+    # Paint
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), _BG)
+        w = self.width()
+        h = self.height()
+
+        if not self._data:
             p.setPen(QPen(_TEXT))
             p.setFont(QFont("sans-serif", 12))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "暂无资金曲线数据")
             p.end()
             return
 
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), _BG)
-        w = self.width()
-        h = self.height()
-        chart_w = w - _MARGIN_L - _MARGIN_R
+        eq_min, eq_max = self._eq_range()
+        n = len(self._data)
         chart_h = h - _MARGIN_T - _MARGIN_B
 
-        equities = [pt.get("equity_after", 100000) for pt in self._data]
-        eq_min = min(equities) * 0.98
-        eq_max = max(equities) * 1.02
-        if eq_max == eq_min:
-            eq_max = eq_min + 1000
-        n = len(self._data)
-
-        def to_x(i):
-            return _MARGIN_L + (i / max(n - 1, 1)) * chart_w
-
-        def to_y(val):
-            return _MARGIN_T + (1.0 - (val - eq_min) / (eq_max - eq_min)) * chart_h
-
-        self._draw_grid(p, w, h, chart_w, chart_h, eq_min, eq_max, n, to_x, to_y)
+        self._draw_grid(p, w, h, eq_min, eq_max, n)
 
         self._pts = []
         for i, pt in enumerate(self._data):
-            self._pts.append(QPointF(to_x(i), to_y(pt.get("equity_after", 100000))))
+            x = self._to_x(i)
+            y = self._to_y(pt.get("equity_after", 100000), eq_min, eq_max)
+            self._pts.append(QPointF(x, y))
+
+        p.setClipRect(_MARGIN_L, 0, w - _MARGIN_L - _MARGIN_R, h)
 
         for i, pt in enumerate(self._data):
             if pt.get("is_reset"):
-                x = to_x(i)
-                p.setPen(QPen(_RESET_LINE, 1, Qt.PenStyle.DashLine))
-                p.drawLine(QPointF(x, _MARGIN_T), QPointF(x, _MARGIN_T + chart_h))
-                p.setFont(QFont("sans-serif", 9))
-                p.setPen(QPen(_RESET_LINE))
-                p.drawText(QPointF(x + 2, _MARGIN_T + 12), "破产重置")
+                x = self._to_x(i)
+                if _MARGIN_L <= x <= w - _MARGIN_R:
+                    p.setPen(QPen(_RESET_LINE, 1, Qt.PenStyle.DashLine))
+                    p.drawLine(QPointF(x, _MARGIN_T), QPointF(x, _MARGIN_T + chart_h))
+                    p.setFont(QFont("sans-serif", 9))
+                    p.setPen(QPen(_RESET_LINE))
+                    p.drawText(QPointF(x + 2, _MARGIN_T + 12), "破产重置")
 
         if len(self._pts) > 1:
             for i in range(1, len(self._pts)):
+                x0, x1 = self._pts[i - 1].x(), self._pts[i].x()
+                if x1 < _MARGIN_L and x0 < _MARGIN_L:
+                    continue
+                if x0 > w - _MARGIN_R and x1 > w - _MARGIN_R:
+                    continue
                 eq_prev = self._data[i - 1].get("equity_after", 100000)
                 eq_curr = self._data[i].get("equity_after", 100000)
                 color = _LINE_UP if eq_curr >= eq_prev else _LINE_DOWN
@@ -115,6 +166,8 @@ class EquityCurveWidget(QWidget):
                 p.drawLine(self._pts[i - 1], self._pts[i])
 
         for i, qp in enumerate(self._pts):
+            if qp.x() < _MARGIN_L - 5 or qp.x() > w - _MARGIN_R + 5:
+                continue
             pnl = self._data[i].get("pnl") or 0
             dot_color = _DOT_HOVER if i == self._hover_idx else (_DOT_WIN if pnl >= 0 else _DOT_LOSE)
             radius = 5 if i == self._hover_idx else 3
@@ -122,40 +175,69 @@ class EquityCurveWidget(QWidget):
             p.setBrush(QBrush(dot_color))
             p.drawEllipse(qp, radius, radius)
 
-        if self._hover_idx >= 0 and self._hover_idx < len(self._pts):
+        p.setClipping(False)
+
+        if 0 <= self._hover_idx < len(self._pts):
             pt = self._pts[self._hover_idx]
-            p.setPen(QPen(QColor("#5b5bff80"), 1, Qt.PenStyle.DashLine))
-            p.drawLine(QPointF(pt.x(), _MARGIN_T), QPointF(pt.x(), _MARGIN_T + chart_h))
-            p.drawLine(QPointF(_MARGIN_L, pt.y()), QPointF(_MARGIN_L + chart_w, pt.y()))
+            if _MARGIN_L <= pt.x() <= w - _MARGIN_R:
+                p.setPen(QPen(QColor("#5b5bff80"), 1, Qt.PenStyle.DashLine))
+                p.drawLine(QPointF(pt.x(), _MARGIN_T), QPointF(pt.x(), _MARGIN_T + chart_h))
+                p.drawLine(QPointF(_MARGIN_L, pt.y()), QPointF(w - _MARGIN_R, pt.y()))
+                eq_val = self._data[self._hover_idx].get("equity_after", 0)
+                p.setPen(QPen(QColor("#d1d4dc")))
+                p.setFont(QFont("sans-serif", 9, QFont.Weight.Bold))
+                p.drawText(QPointF(4, pt.y() + 4), f"{eq_val:,.0f}")
 
         p.end()
 
-    def _draw_grid(self, p, w, h, cw, ch, eq_min, eq_max, n, to_x, to_y):
+    def _draw_grid(self, p: QPainter, w: int, h: int, eq_min: float, eq_max: float, n: int):
+        chart_h = h - _MARGIN_T - _MARGIN_B
         p.setPen(QPen(_GRID, 1))
         for i in range(5):
             val = eq_min + (eq_max - eq_min) * i / 4
-            y = to_y(val)
-            p.drawLine(QPointF(_MARGIN_L, y), QPointF(_MARGIN_L + cw, y))
+            y = self._to_y(val, eq_min, eq_max)
+            p.drawLine(QPointF(_MARGIN_L, y), QPointF(w - _MARGIN_R, y))
             p.setFont(QFont("sans-serif", 9))
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(4, y + 4), f"{val:,.0f}")
             p.setPen(QPen(_GRID, 1))
 
-        step = max(1, n // 6)
-        p.setFont(QFont("sans-serif", 8))
-        for i in range(0, n, step):
-            x = to_x(i)
-            t = self._data[i].get("created_at") or self._data[i].get("exit_time") or ""
-            label = t[:10] if len(t) >= 10 else t
-            p.setPen(QPen(_TEXT))
-            p.drawText(QPointF(x - 20, h - 8), label)
+        if n > 0:
+            visible_start = max(0, int(self._offset_x / self._px_per_pt))
+            visible_end = min(n - 1, int((self._offset_x + w) / self._px_per_pt) + 1)
+            count_visible = visible_end - visible_start + 1
+            step = max(1, count_visible // 8)
+            p.setFont(QFont("sans-serif", 8))
+            for i in range(visible_start, visible_end + 1, step):
+                x = self._to_x(i)
+                if x < _MARGIN_L or x > w - _MARGIN_R:
+                    continue
+                t = self._data[i].get("created_at") or self._data[i].get("exit_time") or ""
+                label = t[:10] if len(t) >= 10 else t
+                p.setPen(QPen(_TEXT))
+                p.drawText(QPointF(x - 20, h - 8), label)
 
-    def mouseMoveEvent(self, event):
+    # ------------------------------------------------------------------
+    # Mouse interaction
+    # ------------------------------------------------------------------
+
+    def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position() if hasattr(event, 'position') else event.localPos()
         mx, my = pos.x(), pos.y()
+
+        if self._dragging:
+            dx = mx - self._drag_start_x
+            self._offset_x = self._drag_start_offset - dx
+            self._clamp_offset()
+            self._pts.clear()
+            self.update()
+            return
+
         best = -1
-        best_dist = 20.0
+        best_dist = 18.0
         for i, qp in enumerate(self._pts):
+            if qp.x() < _MARGIN_L or qp.x() > self.width() - _MARGIN_R:
+                continue
             d = ((qp.x() - mx) ** 2 + (qp.y() - my) ** 2) ** 0.5
             if d < best_dist:
                 best_dist = d
@@ -165,26 +247,65 @@ class EquityCurveWidget(QWidget):
             self._hover_idx = best
             self.update()
             if best >= 0:
-                self._show_tooltip(best, event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos())
+                gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+                self._show_tooltip(best, gp)
             else:
                 self._hide_tooltip()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._hover_idx >= 0:
+                self.point_clicked.emit(self._hover_idx)
+                data = self._data[self._hover_idx]
+                snap = data.get("snapshot_path") or ""
+                if snap and Path(snap).exists():
+                    pix = QPixmap(snap)
+                    if not pix.isNull():
+                        viewer = SnapshotPopup(pix, self._format_trade_title(data), self.window())
+                        viewer.exec()
+                return
+            self._dragging = True
+            pos = event.position() if hasattr(event, 'position') else event.localPos()
+            self._drag_start_x = pos.x()
+            self._drag_start_offset = self._offset_x
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, event):
         if self._hover_idx >= 0:
             self._hover_idx = -1
             self.update()
             self._hide_tooltip()
+        if self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
-    def mousePressEvent(self, event):
-        if self._hover_idx >= 0:
-            self.point_clicked.emit(self._hover_idx)
-            data = self._data[self._hover_idx]
-            snap = data.get("snapshot_path") or ""
-            if snap and Path(snap).exists():
-                pix = QPixmap(snap)
-                if not pix.isNull():
-                    viewer = SnapshotPopup(pix, self._format_trade_title(data), self.window())
-                    viewer.exec()
+    def wheelEvent(self, event: QWheelEvent):
+        delta = event.angleDelta().y()
+        pos = event.position() if hasattr(event, 'position') else event.localPos()
+        mx = pos.x()
+
+        data_x_before = (mx + self._offset_x - _MARGIN_L) / self._px_per_pt
+
+        if delta > 0:
+            self._px_per_pt = min(_MAX_PX_PER_POINT, self._px_per_pt * 1.2)
+        else:
+            self._px_per_pt = max(_MIN_PX_PER_POINT, self._px_per_pt / 1.2)
+
+        self._offset_x = data_x_before * self._px_per_pt - (mx - _MARGIN_L)
+        self._clamp_offset()
+        self._pts.clear()
+        self._hide_tooltip()
+        self._hover_idx = -1
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Tooltip
+    # ------------------------------------------------------------------
 
     def _show_tooltip(self, idx: int, global_pos):
         data = self._data[idx]
