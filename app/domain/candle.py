@@ -170,6 +170,12 @@ class ClosedTrade:
     max_adverse: float = 0.0
     tags: List[str] = field(default_factory=list)
     notes: str = ""
+    mistake_tags: List[str] = field(default_factory=list)
+    execution_score: int = 0
+    planned_risk_pct: float = 0.0
+    entry_reason: str = ""
+    exit_review: str = ""
+    commission: float = 0.0
 
     @property
     def pnl(self) -> float:

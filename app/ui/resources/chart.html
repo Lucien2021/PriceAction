@@ -131,6 +131,16 @@ function addCandle(candle,volume){
 function setMAData(data){ if(maSeries)maSeries.setData(data); }
 function addMAPoint(pt){ if(maSeries)maSeries.update(pt); }
 function setMarkers(m){ if(candleSeries)candleSeries.setMarkers(m); }
+function getDrawingsJSON(){ return JSON.stringify(drawings||[]); }
+function setDrawingsJSON(payload){
+  try{
+    drawings=payload?JSON.parse(payload):[];
+    selectedIdx=-1;currentDraw=null;dragOffset=null;channelEdgeDrag=null;
+    renderAll();
+  }catch(err){
+    drawings=[];renderAll();
+  }
+}
 function clearChart(){
   if(candleSeries)candleSeries.setData([]);
   if(volumeSeries)volumeSeries.setData([]);

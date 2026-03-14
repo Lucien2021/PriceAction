@@ -43,6 +43,14 @@ class ReplaySession:
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
+    setup_type: str = ""
+    scenario_tag: str = ""
+    plan_notes: str = ""
+    plan_direction: str = ""
+    plan_invalidation: str = ""
+    difficulty: int = 0
+    score: int = 0
+
     # ------------------------------------------------------------------
 
     def setup(

@@ -74,6 +74,7 @@ class ReplayEngine:
         future_bars: int = 120,
         date_start: Optional[datetime] = None,
         date_end: Optional[datetime] = None,
+        scenario_tag: str = "",
     ) -> Tuple[List[Candle], List[Candle]]:
         all_candles = self._cache.load_candles(symbol, timeframe)
         if date_start or date_end:
@@ -100,6 +101,13 @@ class ReplayEngine:
 
         max_start = len(all_candles) - total_needed
         candidates = [i for i in range(0, max_start + 1) if i not in used]
+        candidates = self._filter_candidates_by_scenario(
+            all_candles,
+            candidates,
+            visible_bars=visible_bars,
+            future_bars=future_bars,
+            scenario_tag=scenario_tag,
+        ) or candidates
 
         if not candidates:
             conn.execute(
@@ -120,6 +128,70 @@ class ReplayEngine:
         visible = all_candles[start: start + visible_bars]
         future = all_candles[start + visible_bars: start + total_needed]
         return visible, future
+
+    def _filter_candidates_by_scenario(
+        self,
+        candles: List[Candle],
+        candidates: List[int],
+        visible_bars: int,
+        future_bars: int,
+        scenario_tag: str,
+    ) -> List[int]:
+        tag = (scenario_tag or "").strip().lower()
+        if not tag:
+            return candidates
+
+        matched: List[int] = []
+        total_needed = visible_bars + future_bars
+        for start in candidates:
+            window = candles[start: start + total_needed]
+            if len(window) < total_needed:
+                continue
+            visible = window[:visible_bars]
+            future = window[visible_bars:]
+            if self._match_scenario(visible, future, tag):
+                matched.append(start)
+        return matched
+
+    def _match_scenario(self, visible: List[Candle], future: List[Candle], tag: str) -> bool:
+        if not visible or not future:
+            return False
+        vis_start = visible[0].close
+        vis_end = visible[-1].close
+        fut_end = future[-1].close
+        vis_high = max(c.high for c in visible)
+        vis_low = min(c.low for c in visible)
+        vis_range = max(vis_high - vis_low, 1e-6)
+        future_high = max(c.high for c in future)
+        future_low = min(c.low for c in future)
+        total_move = (fut_end - vis_start) / vis_start if vis_start else 0.0
+        visible_move = (vis_end - vis_start) / vis_start if vis_start else 0.0
+        future_move = (fut_end - vis_end) / vis_end if vis_end else 0.0
+
+        if tag in {"趋势回踩", "trend_pullback", "trend", "趋势"}:
+            return visible_move > 0.03 and future_low <= vis_end * 0.985 and fut_end >= vis_end
+
+        if tag in {"区间突破", "range_breakout", "breakout"}:
+            return (
+                vis_range / vis_end < 0.08
+                and (future_high > vis_high * 1.01 or future_low < vis_low * 0.99)
+            )
+
+        if tag in {"假突破", "false_breakout"}:
+            broke_up = future_high > vis_high * 1.01 and fut_end < vis_high
+            broke_down = future_low < vis_low * 0.99 and fut_end > vis_low
+            return broke_up or broke_down
+
+        if tag in {"反转确认", "reversal_confirm", "reversal"}:
+            return visible_move * future_move < 0 and abs(future_move) > 0.02
+
+        if tag in {"高波动", "high_volatility"}:
+            return (future_high - future_low) / max(vis_end, 1e-6) > 0.08
+
+        if tag in {"震荡", "range"}:
+            return abs(total_move) < 0.03 and (future_high - future_low) / max(vis_end, 1e-6) < 0.1
+
+        return True
 
     def get_candles_for_date_range(
         self,

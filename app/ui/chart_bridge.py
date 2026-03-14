@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import Callable, List
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtWebChannel import QWebChannel
@@ -173,6 +173,20 @@ class ChartWidget(QWebEngineView):
 
     def clear_drawings(self) -> None:
         self._run_js("clearDrawings()")
+
+    def get_drawings(self, callback: Callable[[list], None]) -> None:
+        def _done(result):
+            try:
+                payload = json.loads(result) if result else []
+            except Exception:
+                payload = []
+            callback(payload)
+
+        self.page().runJavaScript("getDrawingsJSON()", _done)
+
+    def set_drawings(self, drawings: list) -> None:
+        payload = json.dumps(drawings, ensure_ascii=False)
+        self._run_js(f"setDrawingsJSON({json.dumps(payload)})")
 
     # ------------------------------------------------------------------
     # Trade markers builder

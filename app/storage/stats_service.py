@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from app.domain.candle import (
-    ClosedTrade, Prediction, Symbol, Timeframe, TradeDirection,
-    PredictionDirection,
-)
-from app.replay.session import ReplaySession, TrainingMode
+from app.domain.candle import ClosedTrade, Prediction
+from app.replay.session import ReplaySession
 from app.storage.models import get_connection
 
 
@@ -26,6 +23,7 @@ class AggregateStats:
     expectancy: float = 0.0
     profit_factor: float = 0.0
     total_pnl: float = 0.0
+    total_commission: float = 0.0
     max_consecutive_wins: int = 0
     max_consecutive_losses: int = 0
     max_drawdown_pct: float = 0.0
@@ -46,10 +44,13 @@ class StatsService:
     # ------------------------------------------------------------------
 
     def save_session(self, session: ReplaySession) -> None:
+        self._conn.execute("DELETE FROM trades WHERE session_id=?", (session.session_id,))
+        self._conn.execute("DELETE FROM predictions WHERE session_id=?", (session.session_id,))
         self._conn.execute(
             "INSERT OR REPLACE INTO sessions "
-            "(id, symbol, timeframe, mode, started_at, finished_at, visible_bars, future_bars) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, symbol, timeframe, mode, started_at, finished_at, visible_bars, future_bars, "
+            " setup_type, scenario_tag, plan_notes, plan_direction, plan_invalidation, difficulty, score) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.session_id,
                 session.symbol.code if session.symbol else "",
@@ -59,78 +60,202 @@ class StatsService:
                 session.finished_at.isoformat() if session.finished_at else None,
                 len(session.visible_candles),
                 len(session.future_candles),
+                session.setup_type,
+                session.scenario_tag,
+                session.plan_notes,
+                session.plan_direction,
+                session.plan_invalidation,
+                session.difficulty,
+                session.score,
             ),
         )
 
-        for t in session.closed_trades:
-            self._save_trade(session.session_id, t)
-
-        for p in session.predictions:
-            self._save_prediction(session.session_id, p)
+        for trade in session.closed_trades:
+            self._save_trade(session.session_id, trade)
+        for prediction in session.predictions:
+            self._save_prediction(session.session_id, prediction)
 
         self._conn.commit()
 
-    def _save_trade(self, session_id: str, t: ClosedTrade) -> None:
+    def _save_trade(self, session_id: str, trade: ClosedTrade) -> None:
         self._conn.execute(
             "INSERT INTO trades "
             "(session_id, direction, entry_price, exit_price, quantity, "
             " entry_time, exit_time, entry_bar_index, exit_bar_index, "
             " stop_loss, take_profit, exit_reason, pnl, pnl_pct, r_multiple, "
-            " hold_bars, max_favorable, max_adverse, tags, notes) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " hold_bars, max_favorable, max_adverse, tags, notes, "
+            " mistake_tags, execution_score, planned_risk_pct, entry_reason, exit_review, commission) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 session_id,
-                t.direction.value,
-                t.entry_price,
-                t.exit_price,
-                t.quantity,
-                t.entry_time.isoformat() if t.entry_time else None,
-                t.exit_time.isoformat() if t.exit_time else None,
-                t.entry_bar_index,
-                t.exit_bar_index,
-                t.stop_loss,
-                t.take_profit,
-                t.exit_reason,
-                t.pnl,
-                t.pnl_pct,
-                t.r_multiple,
-                t.hold_bars,
-                t.max_favorable,
-                t.max_adverse,
-                json.dumps(t.tags),
-                t.notes,
+                trade.direction.value,
+                trade.entry_price,
+                trade.exit_price,
+                trade.quantity,
+                trade.entry_time.isoformat() if trade.entry_time else None,
+                trade.exit_time.isoformat() if trade.exit_time else None,
+                trade.entry_bar_index,
+                trade.exit_bar_index,
+                trade.stop_loss,
+                trade.take_profit,
+                trade.exit_reason,
+                trade.pnl,
+                trade.pnl_pct,
+                trade.r_multiple,
+                trade.hold_bars,
+                trade.max_favorable,
+                trade.max_adverse,
+                json.dumps(trade.tags, ensure_ascii=False),
+                trade.notes,
+                json.dumps(trade.mistake_tags, ensure_ascii=False),
+                trade.execution_score,
+                trade.planned_risk_pct,
+                trade.entry_reason,
+                trade.exit_review,
+                trade.commission,
             ),
         )
 
-    def _save_prediction(self, session_id: str, p: Prediction) -> None:
+    def _save_prediction(self, session_id: str, prediction: Prediction) -> None:
         self._conn.execute(
             "INSERT INTO predictions "
-            "(session_id, direction, bar_index, timestamp, lookahead_bars, "
-            " actual_direction, is_correct) "
+            "(session_id, direction, bar_index, timestamp, lookahead_bars, actual_direction, is_correct) "
             "VALUES (?,?,?,?,?,?,?)",
             (
                 session_id,
-                p.direction.value,
-                p.bar_index,
-                p.timestamp.isoformat() if p.timestamp else None,
-                p.lookahead_bars,
-                p.actual_direction.value if p.actual_direction else None,
-                int(p.is_correct) if p.is_correct is not None else None,
+                prediction.direction.value,
+                prediction.bar_index,
+                prediction.timestamp.isoformat() if prediction.timestamp else None,
+                prediction.lookahead_bars,
+                prediction.actual_direction.value if prediction.actual_direction else None,
+                int(prediction.is_correct) if prediction.is_correct is not None else None,
             ),
         )
 
-    def save_note(self, session_id: str, content: str, tags: List[str] | None = None) -> None:
+    def save_note(self, session_id: str, content: str, tags: Optional[List[str]] = None) -> None:
         self._conn.execute(
             "INSERT INTO session_notes (session_id, created_at, content, tags) VALUES (?,?,?,?)",
-            (session_id, datetime.now().isoformat(), content, json.dumps(tags or [])),
+            (session_id, datetime.now().isoformat(), content, json.dumps(tags or [], ensure_ascii=False)),
         )
         self._conn.commit()
 
     def update_trade_tags(self, trade_id: int, tags: List[str], notes: str = "") -> None:
         self._conn.execute(
             "UPDATE trades SET tags=?, notes=? WHERE id=?",
-            (json.dumps(tags), notes, trade_id),
+            (json.dumps(tags, ensure_ascii=False), notes, trade_id),
         )
+        self._conn.commit()
+
+    def update_trade_execution(
+        self,
+        trade_id: int,
+        mistake_tags: List[str],
+        execution_score: int,
+        entry_reason: str = "",
+        exit_review: str = "",
+    ) -> None:
+        self._conn.execute(
+            "UPDATE trades SET mistake_tags=?, execution_score=?, entry_reason=?, exit_review=? WHERE id=?",
+            (
+                json.dumps(mistake_tags, ensure_ascii=False),
+                execution_score,
+                entry_reason,
+                exit_review,
+                trade_id,
+            ),
+        )
+        self._conn.commit()
+
+    def update_session_score(self, session_id: str, score: int, difficulty: int = 0) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET score=?, difficulty=? WHERE id=?",
+            (score, difficulty, session_id),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # PA annotations / mistake book
+    # ------------------------------------------------------------------
+
+    def save_pa_annotation(
+        self,
+        session_id: str,
+        ann_type: str,
+        data_json: str,
+        notes: str = "",
+        is_correct: Optional[int] = None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO pa_annotations (session_id, created_at, ann_type, data_json, notes, is_correct) "
+            "VALUES (?,?,?,?,?,?)",
+            (session_id, datetime.now().isoformat(), ann_type, data_json, notes, is_correct),
+        )
+        self._conn.commit()
+
+    def get_pa_annotations(self, session_id: str) -> List[Dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM pa_annotations WHERE session_id=? ORDER BY created_at",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_mistake(
+        self,
+        session_id: str,
+        symbol: str,
+        timeframe: str,
+        category: str = "trade",
+        setup_type: str = "",
+        mistake_tags: Optional[List[str]] = None,
+        description: str = "",
+        slice_start: int = 0,
+        slice_end: int = 0,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO mistake_book "
+            "(session_id, created_at, symbol, timeframe, category, setup_type, mistake_tags, description, slice_start, slice_end) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                session_id,
+                datetime.now().isoformat(),
+                symbol,
+                timeframe,
+                category,
+                setup_type,
+                json.dumps(mistake_tags or [], ensure_ascii=False),
+                description,
+                slice_start,
+                slice_end,
+            ),
+        )
+        self._conn.commit()
+
+    def get_mistakes(
+        self,
+        symbol: Optional[str] = None,
+        category: Optional[str] = None,
+        retrained: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        parts: List[str] = []
+        params: List[Any] = []
+        if symbol:
+            parts.append("symbol=?")
+            params.append(symbol)
+        if category:
+            parts.append("category=?")
+            params.append(category)
+        if retrained is not None:
+            parts.append("retrained=?")
+            params.append(int(retrained))
+        where = f"WHERE {' AND '.join(parts)}" if parts else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM mistake_book {where} ORDER BY created_at DESC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_mistake_retrained(self, mistake_id: int) -> None:
+        self._conn.execute("UPDATE mistake_book SET retrained=1 WHERE id=?", (mistake_id,))
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -138,31 +263,47 @@ class StatsService:
     # ------------------------------------------------------------------
 
     def get_all_sessions(self) -> List[Dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM sessions ORDER BY started_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        rows = self._conn.execute("SELECT * FROM sessions ORDER BY started_at DESC").fetchall()
+        return [dict(row) for row in rows]
 
     def get_session_trades(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM trades WHERE session_id=? ORDER BY entry_bar_index",
             (session_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(row) for row in rows]
 
     def get_session_predictions(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM predictions WHERE session_id=? ORDER BY bar_index",
             (session_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(row) for row in rows]
 
     def get_session_notes(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM session_notes WHERE session_id=? ORDER BY created_at DESC",
             (session_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(row) for row in rows]
+
+    def get_distinct_session_values(self, field_name: str) -> List[str]:
+        allowed = {"symbol", "timeframe", "setup_type", "scenario_tag", "mode"}
+        if field_name not in allowed:
+            return []
+        rows = self._conn.execute(
+            f"SELECT DISTINCT {field_name} FROM sessions WHERE {field_name} IS NOT NULL AND {field_name}!='' ORDER BY {field_name}"
+        ).fetchall()
+        return [row[0] for row in rows if row[0]]
+
+    def get_distinct_trade_values(self, field_name: str) -> List[str]:
+        allowed = {"direction", "exit_reason"}
+        if field_name not in allowed:
+            return []
+        rows = self._conn.execute(
+            f"SELECT DISTINCT {field_name} FROM trades WHERE {field_name} IS NOT NULL AND {field_name}!='' ORDER BY {field_name}"
+        ).fetchall()
+        return [row[0] for row in rows if row[0]]
 
     # ------------------------------------------------------------------
     # Aggregate statistics
@@ -173,62 +314,53 @@ class StatsService:
         symbol: Optional[str] = None,
         timeframe: Optional[str] = None,
     ) -> AggregateStats:
-        where_parts, params = self._build_filter(symbol, timeframe)
-
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
         stats = AggregateStats()
 
-        # sessions count
-        q = f"SELECT COUNT(*) FROM sessions {where_parts}"
-        stats.total_sessions = self._conn.execute(q, params).fetchone()[0]
+        stats.total_sessions = self._conn.execute(
+            f"SELECT COUNT(*) FROM sessions s {where_clause}",
+            params,
+        ).fetchone()[0]
 
-        # trades
-        trade_q = (
-            f"SELECT t.* FROM trades t JOIN sessions s ON t.session_id=s.id {where_parts} "
-            f"ORDER BY t.entry_time"
-        )
-        rows = self._conn.execute(trade_q, params).fetchall()
-        trades = [dict(r) for r in rows]
+        trade_rows = self._conn.execute(
+            f"SELECT t.* FROM trades t JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.entry_time",
+            params,
+        ).fetchall()
+        trades = [dict(row) for row in trade_rows]
         stats.total_trades = len(trades)
 
         if trades:
-            wins = [t for t in trades if (t["pnl"] or 0) > 0]
-            losses = [t for t in trades if (t["pnl"] or 0) < 0]
+            wins = [trade for trade in trades if (trade["pnl"] or 0) > 0]
+            losses = [trade for trade in trades if (trade["pnl"] or 0) < 0]
             stats.winners = len(wins)
             stats.losers = len(losses)
             closed = stats.winners + stats.losers
             stats.win_rate = stats.winners / closed if closed else 0.0
-
-            stats.avg_pnl_pct = sum(t["pnl_pct"] or 0 for t in trades) / len(trades)
-
-            r_vals = [t["r_multiple"] for t in trades if t["r_multiple"] is not None]
-            stats.avg_r = sum(r_vals) / len(r_vals) if r_vals else None
-
-            gross_profit = sum(t["pnl"] for t in trades if (t["pnl"] or 0) > 0)
-            gross_loss = abs(sum(t["pnl"] for t in trades if (t["pnl"] or 0) < 0))
+            stats.avg_pnl_pct = sum(trade["pnl_pct"] or 0 for trade in trades) / len(trades)
+            r_values = [trade["r_multiple"] for trade in trades if trade["r_multiple"] is not None]
+            stats.avg_r = sum(r_values) / len(r_values) if r_values else None
+            gross_profit = sum(trade["pnl"] or 0 for trade in trades if (trade["pnl"] or 0) > 0)
+            gross_loss = abs(sum(trade["pnl"] or 0 for trade in trades if (trade["pnl"] or 0) < 0))
             stats.profit_factor = gross_profit / gross_loss if gross_loss else float("inf")
-            stats.total_pnl = sum(t["pnl"] or 0 for t in trades)
-
+            stats.total_pnl = sum(trade["pnl"] or 0 for trade in trades)
+            stats.total_commission = sum(trade["commission"] or 0 for trade in trades)
+            avg_win = sum(trade["pnl_pct"] or 0 for trade in wins) / len(wins) if wins else 0.0
+            avg_loss = sum(trade["pnl_pct"] or 0 for trade in losses) / len(losses) if losses else 0.0
             loss_rate = 1 - stats.win_rate
-            avg_win = sum(t["pnl_pct"] or 0 for t in wins) / len(wins) if wins else 0
-            avg_loss = sum(t["pnl_pct"] or 0 for t in losses) / len(losses) if losses else 0
             stats.expectancy = (stats.win_rate * avg_win) + (loss_rate * avg_loss)
-
-            stats.max_consecutive_wins = self._streak(trades, True)
-            stats.max_consecutive_losses = self._streak(trades, False)
+            stats.max_consecutive_wins = self._streak(trades, winning=True)
+            stats.max_consecutive_losses = self._streak(trades, winning=False)
             stats.max_drawdown_pct = self._drawdown(trades)
 
-        # predictions
-        pred_q = (
-            f"SELECT p.* FROM predictions p JOIN sessions s ON p.session_id=s.id {where_parts}"
-        )
-        pred_rows = self._conn.execute(pred_q, params).fetchall()
-        stats.total_predictions = len(pred_rows)
-        stats.correct_predictions = sum(1 for r in pred_rows if r["is_correct"] == 1)
+        prediction_rows = self._conn.execute(
+            f"SELECT p.* FROM predictions p JOIN sessions s ON p.session_id=s.id {where_clause}",
+            params,
+        ).fetchall()
+        stats.total_predictions = len(prediction_rows)
+        stats.correct_predictions = sum(1 for row in prediction_rows if row["is_correct"] == 1)
         stats.prediction_accuracy = (
-            stats.correct_predictions / stats.total_predictions
-            if stats.total_predictions else 0.0
+            stats.correct_predictions / stats.total_predictions if stats.total_predictions else 0.0
         )
-
         return stats
 
     def get_equity_curve(
@@ -236,63 +368,64 @@ class StatsService:
         symbol: Optional[str] = None,
         timeframe: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        where_parts, params = self._build_filter(symbol, timeframe)
-        q = (
-            f"SELECT t.exit_time, t.pnl, t.pnl_pct, t.r_multiple "
-            f"FROM trades t JOIN sessions s ON t.session_id=s.id {where_parts} "
-            f"ORDER BY t.exit_time"
-        )
-        rows = self._conn.execute(q, params).fetchall()
-        curve = []
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        rows = self._conn.execute(
+            f"SELECT t.exit_time, t.pnl, t.pnl_pct, t.r_multiple FROM trades t "
+            f"JOIN sessions s ON t.session_id=s.id {where_clause} ORDER BY t.exit_time",
+            params,
+        ).fetchall()
         cumulative = 0.0
-        for r in rows:
-            cumulative += r["pnl"] or 0
-            curve.append({
-                "time": r["exit_time"],
-                "pnl": r["pnl"],
-                "cumulative_pnl": cumulative,
-                "pnl_pct": r["pnl_pct"],
-                "r_multiple": r["r_multiple"],
-            })
-        return curve
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            cumulative += row["pnl"] or 0
+            result.append(
+                {
+                    "time": row["exit_time"],
+                    "pnl": row["pnl"],
+                    "cumulative_pnl": cumulative,
+                    "pnl_pct": row["pnl_pct"],
+                    "r_multiple": row["r_multiple"],
+                }
+            )
+        return result
 
     def get_rolling_win_rate(self, window: int = 20) -> List[Dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT exit_time, pnl FROM trades ORDER BY exit_time"
-        ).fetchall()
-        results = []
-        buffer = []
-        for r in rows:
-            buffer.append(1 if (r["pnl"] or 0) > 0 else 0)
-            if len(buffer) > window:
-                buffer.pop(0)
-            results.append({
-                "time": r["exit_time"],
-                "win_rate": sum(buffer) / len(buffer),
-                "sample_size": len(buffer),
-            })
-        return results
+        rows = self._conn.execute("SELECT exit_time, pnl FROM trades ORDER BY exit_time").fetchall()
+        bucket: List[int] = []
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            bucket.append(1 if (row["pnl"] or 0) > 0 else 0)
+            if len(bucket) > window:
+                bucket.pop(0)
+            result.append(
+                {
+                    "time": row["exit_time"],
+                    "win_rate": sum(bucket) / len(bucket),
+                    "sample_size": len(bucket),
+                }
+            )
+        return result
 
     def get_r_distribution(self) -> Dict[str, int]:
         rows = self._conn.execute(
             "SELECT r_multiple FROM trades WHERE r_multiple IS NOT NULL"
         ).fetchall()
         buckets: Dict[str, int] = {}
-        for r in rows:
-            val = r["r_multiple"]
-            if val <= -3:
+        for row in rows:
+            value = row["r_multiple"]
+            if value <= -3:
                 key = "<-3R"
-            elif val <= -2:
+            elif value <= -2:
                 key = "-3R~-2R"
-            elif val <= -1:
+            elif value <= -1:
                 key = "-2R~-1R"
-            elif val <= 0:
+            elif value <= 0:
                 key = "-1R~0R"
-            elif val <= 1:
+            elif value <= 1:
                 key = "0R~1R"
-            elif val <= 2:
+            elif value <= 2:
                 key = "1R~2R"
-            elif val <= 3:
+            elif value <= 3:
                 key = "2R~3R"
             else:
                 key = ">3R"
@@ -300,41 +433,135 @@ class StatsService:
         return buckets
 
     # ------------------------------------------------------------------
+    # Drill-down aggregations
+    # ------------------------------------------------------------------
+
+    def get_stats_by_setup(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[Dict[str, Any]]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        where_clause = self._extend_where(where_clause, "s.setup_type!=''")
+        rows = self._conn.execute(
+            f"SELECT s.setup_type, COUNT(t.id) AS cnt, "
+            f"SUM(CASE WHEN t.pnl>0 THEN 1 ELSE 0 END) AS wins, "
+            f"SUM(CASE WHEN t.pnl<0 THEN 1 ELSE 0 END) AS losses, "
+            f"SUM(t.pnl) AS total_pnl, AVG(t.pnl_pct) AS avg_pnl_pct "
+            f"FROM trades t JOIN sessions s ON t.session_id=s.id "
+            f"{where_clause} GROUP BY s.setup_type ORDER BY cnt DESC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_stats_by_mistake(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[Dict[str, Any]]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        rows = self._conn.execute(
+            f"SELECT t.mistake_tags FROM trades t JOIN sessions s ON t.session_id=s.id {where_clause}",
+            params,
+        ).fetchall()
+        counter: Dict[str, int] = {}
+        for row in rows:
+            for tag in json.loads(row["mistake_tags"] or "[]"):
+                counter[tag] = counter.get(tag, 0) + 1
+        return [{"tag": tag, "count": count} for tag, count in sorted(counter.items(), key=lambda item: -item[1])]
+
+    def get_stats_by_scenario(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[Dict[str, Any]]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        where_clause = self._extend_where(where_clause, "s.scenario_tag!=''")
+        rows = self._conn.execute(
+            f"SELECT s.scenario_tag, COUNT(t.id) AS cnt, "
+            f"SUM(CASE WHEN t.pnl>0 THEN 1 ELSE 0 END) AS wins, "
+            f"SUM(t.pnl) AS total_pnl "
+            f"FROM trades t JOIN sessions s ON t.session_id=s.id "
+            f"{where_clause} GROUP BY s.scenario_tag ORDER BY cnt DESC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_stats_by_exit_reason(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[Dict[str, Any]]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        where_clause = self._extend_where(where_clause, "t.exit_reason!=''")
+        rows = self._conn.execute(
+            f"SELECT t.exit_reason, COUNT(*) AS cnt, "
+            f"SUM(CASE WHEN t.pnl>0 THEN 1 ELSE 0 END) AS wins, "
+            f"AVG(t.pnl_pct) AS avg_pnl_pct "
+            f"FROM trades t JOIN sessions s ON t.session_id=s.id "
+            f"{where_clause} GROUP BY t.exit_reason ORDER BY cnt DESC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_execution_score_avg(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Optional[float]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        where_clause = self._extend_where(where_clause, "t.execution_score>0")
+        row = self._conn.execute(
+            f"SELECT AVG(t.execution_score) AS avg_score FROM trades t JOIN sessions s ON t.session_id=s.id {where_clause}",
+            params,
+        ).fetchone()
+        return row["avg_score"] if row and row["avg_score"] is not None else None
+
+    def get_pa_stats(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        ann_rows = self._conn.execute(
+            f"SELECT a.is_correct FROM pa_annotations a JOIN sessions s ON a.session_id=s.id {where_clause}",
+            params,
+        ).fetchall()
+        mistake_rows = self._conn.execute(
+            "SELECT retrained, category FROM mistake_book WHERE category='pa'"
+        ).fetchall()
+        total = len(ann_rows)
+        evaluated = sum(1 for row in ann_rows if row["is_correct"] is not None)
+        correct = sum(1 for row in ann_rows if row["is_correct"] == 1)
+        retrained = sum(1 for row in mistake_rows if row["retrained"] == 1)
+        return {
+            "total_annotations": total,
+            "evaluated_annotations": evaluated,
+            "correct_annotations": correct,
+            "annotation_accuracy": (correct / evaluated) if evaluated else 0.0,
+            "pa_mistakes": len(mistake_rows),
+            "retrained_pa_mistakes": retrained,
+            "retrain_rate": (retrained / len(mistake_rows)) if mistake_rows else 0.0,
+        }
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_filter(symbol: Optional[str], timeframe: Optional[str]):
-        parts = []
-        params: list = []
+    def _build_session_filter(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> tuple[str, List[Any]]:
+        parts: List[str] = []
+        params: List[Any] = []
         if symbol:
             parts.append("s.symbol=?")
             params.append(symbol)
         if timeframe:
             parts.append("s.timeframe=?")
             params.append(timeframe)
-        where = ("WHERE " + " AND ".join(parts)) if parts else ""
-        return where, params
+        return (f"WHERE {' AND '.join(parts)}" if parts else ""), params
+
+    @staticmethod
+    def _extend_where(where_clause: str, condition: str) -> str:
+        if not where_clause:
+            return f"WHERE {condition}"
+        return f"{where_clause} AND {condition}"
 
     @staticmethod
     def _streak(trades: List[dict], winning: bool) -> int:
-        best = cur = 0
-        for t in trades:
-            if ((t["pnl"] or 0) > 0) == winning:
-                cur += 1
-                best = max(best, cur)
+        best = 0
+        current = 0
+        for trade in trades:
+            if ((trade["pnl"] or 0) > 0) == winning:
+                current += 1
+                best = max(best, current)
             else:
-                cur = 0
+                current = 0
         return best
 
     @staticmethod
     def _drawdown(trades: List[dict]) -> float:
-        cum = peak = max_dd = 0.0
-        for t in trades:
-            cum += t["pnl_pct"] or 0
-            if cum > peak:
-                peak = cum
-            dd = peak - cum
-            if dd > max_dd:
-                max_dd = dd
-        return max_dd
+        cumulative = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for trade in trades:
+            cumulative += trade["pnl_pct"] or 0
+            if cumulative > peak:
+                peak = cumulative
+            max_drawdown = max(max_drawdown, peak - cumulative)
+        return max_drawdown
