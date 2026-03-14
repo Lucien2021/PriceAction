@@ -103,10 +103,26 @@ class Position:
     entry_time: Optional[datetime] = None
     max_favorable: float = 0.0
     max_adverse: float = 0.0
+    position_id: str = ""
 
     @property
     def is_long(self) -> bool:
         return self.direction == TradeDirection.LONG
+
+    def update_stop_loss(self, price: Optional[float]) -> None:
+        self.stop_loss = round(price, 2) if price is not None else None
+
+    def update_take_profit(self, price: Optional[float]) -> None:
+        self.take_profit = round(price, 2) if price is not None else None
+
+    def reward_risk_ratio(self, current_price: float) -> Optional[float]:
+        if self.stop_loss is None or self.take_profit is None:
+            return None
+        risk = abs(self.entry_price - self.stop_loss)
+        if risk == 0:
+            return None
+        reward = abs(self.take_profit - self.entry_price)
+        return round(reward / risk, 2)
 
     def unrealized_pnl(self, current_price: float) -> float:
         diff = current_price - self.entry_price
@@ -176,6 +192,10 @@ class ClosedTrade:
     entry_reason: str = ""
     exit_review: str = ""
     commission: float = 0.0
+    snapshot_path: str = ""
+    position_id: str = ""
+    equity_before: float = 0.0
+    equity_after: float = 0.0
 
     @property
     def pnl(self) -> float:

@@ -193,12 +193,85 @@ function updateLimitPrice(id,p){if(limitOrders[id]){limitOrders[id].price=p;rend
 function removeAllLimitOrders(){limitOrders={};renderAll()}
 
 /* ================================================================
+   TRADE PROTECTION LINES (SL / TP / Entry)
+   ================================================================ */
+var tradeLines={};
+var dragTradeLine=null;
+
+function addTradeLine(id,price,lineType,color){
+  tradeLines[id]={price:price,lineType:lineType,color:color||'#FFD700'};renderAll()
+}
+function removeTradeLine(id){delete tradeLines[id];renderAll()}
+function updateTradeLinePrice(id,p){if(tradeLines[id]){tradeLines[id].price=p;renderAll()}}
+function removeAllTradeLines(){tradeLines={};renderAll()}
+
+function renderTradeLines(){
+  for(var id in tradeLines){
+    var tl=tradeLines[id],y=priceToY(tl.price);
+    if(y===null||y<0||y>canvas.height)continue;
+    ctx.save();
+    ctx.strokeStyle=tl.color;ctx.lineWidth=2;
+    if(tl.lineType==='entry'){ctx.setLineDash([4,4])}
+    else if(tl.lineType==='stop_loss'){ctx.setLineDash([6,3])}
+    else if(tl.lineType==='take_profit'){ctx.setLineDash([6,3])}
+    else{ctx.setLineDash([8,4])}
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();
+    ctx.setLineDash([]);
+    var label='';
+    if(tl.lineType==='stop_loss') label='SL '+tl.price.toFixed(2);
+    else if(tl.lineType==='take_profit') label='TP '+tl.price.toFixed(2);
+    else if(tl.lineType==='entry') label='Entry '+tl.price.toFixed(2);
+    else label=id+' '+tl.price.toFixed(2);
+    ctx.fillStyle=tl.color;ctx.font='11px sans-serif';
+    var tw=ctx.measureText(label).width;
+    ctx.fillRect(canvas.width-tw-16,y-16,tw+12,16);
+    ctx.fillStyle='#1e222d';ctx.fillText(label,canvas.width-tw-10,y-4);
+    if(tl.lineType!=='entry'){
+      ctx.fillStyle=tl.color;ctx.fillRect(4,y-6,20,12);
+      ctx.fillStyle='#1e222d';ctx.font='10px sans-serif';ctx.fillText('≡',8,y+4);
+    }
+    ctx.restore();
+  }
+}
+function findTradeLineNear(y){
+  for(var id in tradeLines){
+    if(tradeLines[id].lineType==='entry')continue;
+    var ly=priceToY(tradeLines[id].price);
+    if(ly!=null&&Math.abs(ly-y)<10)return id;
+  }
+  return null;
+}
+
+/* ================================================================
+   SCREENSHOT (render specific bar range)
+   ================================================================ */
+function takeSnapshot(startIdx,endIdx,markers){
+  if(!chart||!candleSeries)return '';
+  chart.timeScale().setVisibleLogicalRange({from:startIdx-5,to:endIdx+5});
+  if(markers&&markers.length)candleSeries.setMarkers(markers);
+  return 'ready';
+}
+function getChartImage(){
+  var el=document.getElementById('chart');
+  var cvs=el.querySelector('canvas');
+  if(!cvs)return '';
+  var merged=document.createElement('canvas');
+  merged.width=el.offsetWidth;merged.height=el.offsetHeight;
+  var mctx=merged.getContext('2d');
+  var canvases=el.querySelectorAll('canvas');
+  for(var i=0;i<canvases.length;i++){mctx.drawImage(canvases[i],0,0)}
+  if(canvas&&ctx){mctx.drawImage(canvas,0,0)}
+  return merged.toDataURL('image/png');
+}
+
+/* ================================================================
    RENDER
    ================================================================ */
 function renderAll(){
   if(!ctx||!canvas)return;
   ctx.clearRect(0,0,canvas.width,canvas.height);
   renderLimitOrders();
+  renderTradeLines();
   for(var i=0;i<drawings.length;i++) renderOne(drawings[i],i===selectedIdx);
   if(currentDraw)renderOne(currentDraw,false,true);
 }
@@ -386,6 +459,12 @@ document.getElementById('container').addEventListener('mousedown',function(e){
     chart.applyOptions({handleScroll:false,handleScale:false});
     e.preventDefault();return;
   }
+  var tlId=findTradeLineNear(pos.y);
+  if(tlId&&drawMode==='none'){
+    dragTradeLine=tlId;canvas.style.pointerEvents='auto';
+    chart.applyOptions({handleScroll:false,handleScale:false});
+    e.preventDefault();return;
+  }
 
   if(drawMode==='none'){
     var edgeHit=hitChannelEdge(pos.x,pos.y);
@@ -434,12 +513,19 @@ document.getElementById('container').addEventListener('mousemove',function(e){
       if(bridge)bridge.onLimitPriceMoved(dragLimit,limitOrders[dragLimit].price)}
     return;
   }
+  if(dragTradeLine){
+    var np=yToPrice(pos.y);
+    if(np!=null){tradeLines[dragTradeLine].price=Math.round(np*100)/100;renderAll();
+      if(bridge)bridge.onTradeLineMoved(dragTradeLine,tradeLines[dragTradeLine].price)}
+    return;
+  }
 
   if(drawMode==='none'&&!mouseDown){
     var nearLo=findLimitNear(pos.y);
+    var nearTl=findTradeLineNear(pos.y);
     var nearEdge=hitChannelEdge(pos.x,pos.y);
     var nearDr=hitTest(pos.x,pos.y);
-    if(nearLo){canvas.style.pointerEvents='auto';canvas.style.cursor='ns-resize'}
+    if(nearLo||nearTl){canvas.style.pointerEvents='auto';canvas.style.cursor='ns-resize'}
     else if(nearEdge){canvas.style.pointerEvents='auto';canvas.style.cursor='ew-resize'}
     else if(nearDr>=0){canvas.style.pointerEvents='auto';canvas.style.cursor='grab'}
     else{canvas.style.pointerEvents='none';canvas.style.cursor='default'}
@@ -486,6 +572,12 @@ document.getElementById('container').addEventListener('mouseup',function(e){
   if(dragLimit){
     if(bridge)bridge.onLimitPriceMoved(dragLimit,limitOrders[dragLimit].price);
     dragLimit=null;
+    if(drawMode==='none'){canvas.style.pointerEvents='none';chart.applyOptions({handleScroll:true,handleScale:true})}
+    return;
+  }
+  if(dragTradeLine){
+    if(bridge)bridge.onTradeLineMoved(dragTradeLine,tradeLines[dragTradeLine].price);
+    dragTradeLine=null;
     if(drawMode==='none'){canvas.style.pointerEvents='none';chart.applyOptions({handleScroll:true,handleScale:true})}
     return;
   }

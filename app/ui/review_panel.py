@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -15,10 +17,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -56,7 +61,7 @@ class ReviewPanel(QWidget):
         layout.addWidget(self._tabs)
 
     # ------------------------------------------------------------------
-    # Build tabs
+    # Overview
     # ------------------------------------------------------------------
 
     def _build_overview_tab(self) -> QWidget:
@@ -87,23 +92,21 @@ class ReviewPanel(QWidget):
 
         self._stats_group = QGroupBox("核心指标")
         stats_lay = QVBoxLayout(self._stats_group)
-        self._lbl_summary = QLabel("暂无数据")
-        self._lbl_summary.setWordWrap(True)
-        self._lbl_summary.setMinimumHeight(140)
+        self._lbl_summary = QTextBrowser()
+        self._lbl_summary.setOpenExternalLinks(False)
+        self._lbl_summary.setMinimumHeight(160)
         stats_lay.addWidget(self._lbl_summary)
 
         self._drill_group = QGroupBox("统计钻取")
         drill_lay = QVBoxLayout(self._drill_group)
-        self._lbl_drilldown = QLabel("")
-        self._lbl_drilldown.setWordWrap(True)
-        self._lbl_drilldown.setMinimumHeight(180)
+        self._lbl_drilldown = QTextBrowser()
+        self._lbl_drilldown.setMinimumHeight(160)
         drill_lay.addWidget(self._lbl_drilldown)
 
         self._extra_group = QGroupBox("训练建议")
         extra_lay = QVBoxLayout(self._extra_group)
-        self._lbl_extra = QLabel("")
-        self._lbl_extra.setWordWrap(True)
-        self._lbl_extra.setMinimumHeight(120)
+        self._lbl_extra = QTextBrowser()
+        self._lbl_extra.setMinimumHeight(100)
         extra_lay.addWidget(self._lbl_extra)
 
         layout.addLayout(filters)
@@ -114,9 +117,15 @@ class ReviewPanel(QWidget):
         layout.addStretch()
         return widget
 
+    # ------------------------------------------------------------------
+    # Journal (with snapshot image)
+    # ------------------------------------------------------------------
+
     def _build_journal_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
 
         self._trade_table = QTableWidget()
         self._trade_table.setColumnCount(14)
@@ -129,7 +138,17 @@ class ReviewPanel(QWidget):
         self._trade_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._trade_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._trade_table.currentCellChanged.connect(self._on_trade_selected)
-        layout.addWidget(self._trade_table)
+        splitter.addWidget(self._trade_table)
+
+        detail_widget = QWidget()
+        detail_layout = QVBoxLayout(detail_widget)
+        detail_layout.setContentsMargins(4, 4, 4, 4)
+
+        self._trade_snapshot_label = QLabel("选中交易后在此显示截图")
+        self._trade_snapshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._trade_snapshot_label.setMinimumHeight(200)
+        self._trade_snapshot_label.setStyleSheet("background:#1e222d;color:#808899;border:1px solid #3d3d5c;")
+        detail_layout.addWidget(self._trade_snapshot_label)
 
         tag_group = QGroupBox("标签与执行复盘")
         tg = QVBoxLayout(tag_group)
@@ -157,19 +176,16 @@ class ReviewPanel(QWidget):
         tg.addLayout(score_row)
 
         self._txt_entry_reason = QTextEdit()
-        self._txt_entry_reason.setMaximumHeight(55)
         self._txt_entry_reason.setPlaceholderText("入场理由 / 是否计划内")
         tg.addWidget(QLabel("入场理由"))
         tg.addWidget(self._txt_entry_reason)
 
         self._txt_exit_review = QTextEdit()
-        self._txt_exit_review.setMaximumHeight(55)
         self._txt_exit_review.setPlaceholderText("出场复盘 / 错误归因")
         tg.addWidget(QLabel("出场复盘"))
         tg.addWidget(self._txt_exit_review)
 
         self._txt_notes = QTextEdit()
-        self._txt_notes.setMaximumHeight(55)
         self._txt_notes.setPlaceholderText("标签笔记 / 补充说明")
         tg.addWidget(QLabel("笔记"))
         tg.addWidget(self._txt_notes)
@@ -180,9 +196,21 @@ class ReviewPanel(QWidget):
         br.addWidget(btn_save)
         br.addStretch()
         tg.addLayout(br)
+        detail_layout.addWidget(tag_group)
 
-        layout.addWidget(tag_group)
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidget(detail_widget)
+        detail_scroll.setWidgetResizable(True)
+        splitter.addWidget(detail_scroll)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
+        layout.addWidget(splitter)
         return widget
+
+    # ------------------------------------------------------------------
+    # Sessions
+    # ------------------------------------------------------------------
 
     def _build_sessions_tab(self) -> QWidget:
         widget = QWidget()
@@ -202,11 +230,11 @@ class ReviewPanel(QWidget):
 
         self._session_detail = QGroupBox("会话详情")
         sd = QVBoxLayout(self._session_detail)
-        self._lbl_session_detail = QLabel("双击上方记录查看训练计划、统计、PA 标注和建议。")
-        self._lbl_session_detail.setWordWrap(True)
-        sd.addWidget(self._lbl_session_detail)
+        self._txt_session_detail = QTextBrowser()
+        self._txt_session_detail.setMinimumHeight(200)
+        self._txt_session_detail.setPlaceholderText("双击上方记录查看训练计划、统计、PA 标注和建议。")
+        sd.addWidget(self._txt_session_detail)
         self._txt_session_note = QTextEdit()
-        self._txt_session_note.setMaximumHeight(80)
         self._txt_session_note.setPlaceholderText("训练总结 / 下次改进建议")
         sd.addWidget(self._txt_session_note)
         btn_save = QPushButton("保存训练笔记")
@@ -214,6 +242,10 @@ class ReviewPanel(QWidget):
         sd.addWidget(btn_save)
         layout.addWidget(self._session_detail)
         return widget
+
+    # ------------------------------------------------------------------
+    # Mistakes
+    # ------------------------------------------------------------------
 
     def _build_mistakes_tab(self) -> QWidget:
         widget = QWidget()
@@ -287,15 +319,17 @@ class ReviewPanel(QWidget):
     def _update_summary(self, agg: AggregateStats):
         r_str = f"{agg.avg_r:.2f}R" if agg.avg_r is not None else "N/A"
         pf = "N/A" if agg.profit_factor == float("inf") else f"{agg.profit_factor:.2f}"
+        bankruptcy = self._stats.get_bankruptcy_count()
         lines = [
             f"训练场次: {agg.total_sessions}    总交易: {agg.total_trades}",
             f"胜率: {agg.win_rate:.1%}    ({agg.winners}胜 / {agg.losers}负)",
             f"平均R: {r_str}    PF: {pf}",
             f"期望值: {agg.expectancy:.2f}%    净盈亏: {agg.total_pnl:+.2f}",
             f"手续费: {agg.total_commission:.2f}    最大回撤: {agg.max_drawdown_pct:.2f}%",
+            f"破产次数: {bankruptcy}",
             f"预测: {agg.total_predictions}次  正确: {agg.correct_predictions}  准确率: {agg.prediction_accuracy:.1%}",
         ]
-        self._lbl_summary.setText("\n".join(lines))
+        self._lbl_summary.setPlainText("\n".join(lines))
 
     def _update_drilldown(self, sym: Optional[str], tf: Optional[str]):
         setup = self._stats.get_stats_by_setup(symbol=sym, timeframe=tf)
@@ -321,7 +355,7 @@ class ReviewPanel(QWidget):
         if avg_exec is not None:
             lines.append(f"平均执行评分: {avg_exec:.1f}")
         lines.append(f"PA标注准确率: {pa['annotation_accuracy']:.1%}  错题复训率: {pa['retrain_rate']:.1%}")
-        self._lbl_drilldown.setText("\n".join(lines) if lines else "暂无钻取统计")
+        self._lbl_drilldown.setPlainText("\n".join(lines) if lines else "暂无钻取统计")
 
     def _update_suggestions(self, sym: Optional[str], tf: Optional[str]):
         rolling = self._stats.get_rolling_win_rate(20)
@@ -337,7 +371,7 @@ class ReviewPanel(QWidget):
             parts.append(f"下次训练建议: 优先针对「{mistakes[0]['tag']}」做单项刻意练习。")
         else:
             parts.append("下次训练建议: 继续保持，并开始为每笔交易补全执行评分。")
-        self._lbl_extra.setText("\n".join(parts))
+        self._lbl_extra.setPlainText("\n".join(parts))
 
     # ------------------------------------------------------------------
     # Journal
@@ -366,8 +400,7 @@ class ReviewPanel(QWidget):
                 mtags = ", ".join(json.loads(t.get("mistake_tags", "[]") or "[]"))
                 vals = [
                     (t.get("entry_time") or "")[:19],
-                    sess.get("symbol", ""),
-                    sess.get("timeframe", ""),
+                    sess.get("symbol", ""), sess.get("timeframe", ""),
                     "做多" if t.get("direction") == "long" else "做空",
                     sess.get("setup_type", ""),
                     f"{(t.get('pnl') or 0):+.2f}",
@@ -395,7 +428,7 @@ class ReviewPanel(QWidget):
             return
         tid = self._trade_id_map[row]
         rec = self._stats._conn.execute(
-            "SELECT tags, notes, mistake_tags, execution_score, entry_reason, exit_review "
+            "SELECT tags, notes, mistake_tags, execution_score, entry_reason, exit_review, snapshot_path "
             "FROM trades WHERE id=?", (tid,),
         ).fetchone()
         if not rec:
@@ -409,6 +442,24 @@ class ReviewPanel(QWidget):
         self._spn_exec_score.setValue(rec["execution_score"] or 0)
         self._txt_entry_reason.setPlainText(rec["entry_reason"] or "")
         self._txt_exit_review.setPlainText(rec["exit_review"] or "")
+
+        snap = rec["snapshot_path"] or ""
+        if snap and Path(snap).exists():
+            pix = QPixmap(snap)
+            if not pix.isNull():
+                self._trade_snapshot_label.setPixmap(
+                    pix.scaledToWidth(
+                        max(self._trade_snapshot_label.width(), 400),
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                self._trade_snapshot_label.setText("")
+            else:
+                self._trade_snapshot_label.setText("截图加载失败")
+                self._trade_snapshot_label.setPixmap(QPixmap())
+        else:
+            self._trade_snapshot_label.setText("暂无截图")
+            self._trade_snapshot_label.setPixmap(QPixmap())
 
     def _on_tag_toggle(self, tag: str, checked: bool):
         row = self._trade_table.currentRow()
@@ -502,12 +553,14 @@ class ReviewPanel(QWidget):
         notes = self._stats.get_session_notes(sid)
         anns = self._stats.get_pa_annotations(sid)
         mistakes = [m for m in self._stats.get_mistakes() if m["session_id"] == sid]
+        snapshots = self._stats.get_equity_snapshots(sid)
 
         w = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
-        l = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
+        l_count = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
         net = sum(t.get("pnl") or 0 for t in trades)
         es = [t.get("execution_score") or 0 for t in trades if t.get("execution_score")]
         ae = sum(es) / len(es) if es else None
+        bankruptcies = max((s.get("bankruptcy_count", 0) for s in snapshots), default=0) if snapshots else 0
 
         lines = [
             f"会话: {sid[:8]}  |  品种: {sess.get('symbol','')}  |  周期: {sess.get('timeframe','')}",
@@ -516,8 +569,10 @@ class ReviewPanel(QWidget):
             f"计划方向: {sess.get('plan_direction') or '-'}  |  失效条件: {sess.get('plan_invalidation') or '-'}",
             f"计划/剧本: {sess.get('plan_notes') or '-'}",
             "",
-            f"交易数: {len(trades)}  |  胜: {w}  |  负: {l}  |  净盈亏: {net:+.2f}",
+            f"交易数: {len(trades)}  |  胜: {w}  |  负: {l_count}  |  净盈亏: {net:+.2f}",
         ]
+        if bankruptcies > 0:
+            lines.append(f"本轮破产: {bankruptcies}次")
         if ae is not None:
             lines.append(f"平均执行评分: {ae:.1f}")
         if preds:
@@ -526,20 +581,20 @@ class ReviewPanel(QWidget):
         if anns:
             lines.append(f"PA标注: {len(anns)}条")
         if mistakes:
-            tags: List[str] = []
+            mtags: List[str] = []
             for m in mistakes:
-                tags.extend(json.loads(m.get("mistake_tags", "[]") or "[]"))
-            lines.append(f"主要错误: {', '.join(tags[:5]) if tags else '无'}")
+                mtags.extend(json.loads(m.get("mistake_tags", "[]") or "[]"))
+            lines.append(f"主要错误: {', '.join(mtags[:5]) if mtags else '无'}")
         if notes:
             lines.append("\n历史笔记:")
-            for n in notes[:3]:
+            for n in notes[:5]:
                 lines.append(f"  [{(n.get('created_at') or '')[:16]}] {n.get('content','')}")
         if mistakes:
             lines.append(f"\n建议: 围绕同一 Setup 连续复训 {mistakes[0].get('category','trade')} 类错题。")
         else:
             lines.append("\n建议: 继续保持，尝试提高执行评分或增加结构标注密度。")
 
-        self._lbl_session_detail.setText("\n".join(lines))
+        self._txt_session_detail.setPlainText("\n".join(lines))
         self._current_detail_session_id = sid
         self._txt_session_note.setPlainText(notes[0]["content"] if notes else "")
         self.session_selected.emit(sid)
@@ -557,7 +612,7 @@ class ReviewPanel(QWidget):
         self._on_session_double_click(self._session_table.currentRow(), 0)
 
     # ------------------------------------------------------------------
-    # Mistake book
+    # Mistakes
     # ------------------------------------------------------------------
 
     def _update_mistakes(self):

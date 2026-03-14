@@ -101,11 +101,23 @@ CREATE TABLE IF NOT EXISTS mistake_book (
     retrained   INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(id),
+    trade_id        INTEGER,
+    created_at      TEXT NOT NULL,
+    equity_before   REAL NOT NULL DEFAULT 100000,
+    equity_after    REAL NOT NULL DEFAULT 100000,
+    is_reset        INTEGER DEFAULT 0,
+    bankruptcy_count INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_session ON trades(session_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_session ON predictions(session_id);
 CREATE INDEX IF NOT EXISTS idx_notes_session ON session_notes(session_id);
 CREATE INDEX IF NOT EXISTS idx_pa_ann_session ON pa_annotations(session_id);
 CREATE INDEX IF NOT EXISTS idx_mistake_session ON mistake_book(session_id);
+CREATE INDEX IF NOT EXISTS idx_equity_session ON equity_snapshots(session_id);
 """
 
 _MIGRATIONS = [
@@ -122,6 +134,10 @@ _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN entry_reason TEXT DEFAULT ''",
     "ALTER TABLE trades ADD COLUMN exit_review TEXT DEFAULT ''",
     "ALTER TABLE trades ADD COLUMN commission REAL DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN snapshot_path TEXT DEFAULT ''",
+    "ALTER TABLE trades ADD COLUMN position_id TEXT DEFAULT ''",
+    "ALTER TABLE trades ADD COLUMN equity_before REAL DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN equity_after REAL DEFAULT 0",
 ]
 
 

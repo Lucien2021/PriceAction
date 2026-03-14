@@ -16,7 +16,8 @@ _HTML_PATH = Path(__file__).parent / "resources" / "chart.html"
 
 class _Bridge(QObject):
     chart_ready_signal = Signal()
-    limit_price_moved = Signal(str, float)  # order_id, new_price
+    limit_price_moved = Signal(str, float)
+    trade_line_moved = Signal(str, float)
 
     @Slot()
     def chartReady(self):
@@ -26,16 +27,22 @@ class _Bridge(QObject):
     def onLimitPriceMoved(self, order_id: str, new_price: float):
         self.limit_price_moved.emit(order_id, new_price)
 
+    @Slot(str, float)
+    def onTradeLineMoved(self, line_id: str, new_price: float):
+        self.trade_line_moved.emit(line_id, new_price)
+
 
 class ChartWidget(QWebEngineView):
     chart_ready = Signal()
     limit_price_changed = Signal(str, float)
+    trade_line_changed = Signal(str, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._bridge = _Bridge()
         self._bridge.chart_ready_signal.connect(self._on_ready)
         self._bridge.limit_price_moved.connect(self.limit_price_changed)
+        self._bridge.trade_line_moved.connect(self.trade_line_changed)
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
         self.page().setWebChannel(self._channel)
@@ -187,6 +194,35 @@ class ChartWidget(QWebEngineView):
     def set_drawings(self, drawings: list) -> None:
         payload = json.dumps(drawings, ensure_ascii=False)
         self._run_js(f"setDrawingsJSON({json.dumps(payload)})")
+
+    # ------------------------------------------------------------------
+    # Trade protection lines (SL / TP / Entry)
+    # ------------------------------------------------------------------
+
+    def add_trade_line(self, line_id: str, price: float, line_type: str, color: str) -> None:
+        self._run_js(f"addTradeLine('{line_id}', {price}, '{line_type}', '{color}')")
+
+    def remove_trade_line(self, line_id: str) -> None:
+        self._run_js(f"removeTradeLine('{line_id}')")
+
+    def update_trade_line(self, line_id: str, price: float) -> None:
+        self._run_js(f"updateTradeLinePrice('{line_id}', {price})")
+
+    def remove_all_trade_lines(self) -> None:
+        self._run_js("removeAllTradeLines()")
+
+    # ------------------------------------------------------------------
+    # Screenshot
+    # ------------------------------------------------------------------
+
+    def prepare_snapshot(self, start_idx: int, end_idx: int, markers: list) -> None:
+        mk = json.dumps(markers, ensure_ascii=False)
+        self._run_js(f"takeSnapshot({start_idx},{end_idx},{mk})")
+
+    def capture_image(self, callback: Callable[[str], None]) -> None:
+        def _done(result):
+            callback(result or "")
+        self.page().runJavaScript("getChartImage()", _done)
 
     # ------------------------------------------------------------------
     # Trade markers builder

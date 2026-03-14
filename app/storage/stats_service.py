@@ -84,8 +84,9 @@ class StatsService:
             " entry_time, exit_time, entry_bar_index, exit_bar_index, "
             " stop_loss, take_profit, exit_reason, pnl, pnl_pct, r_multiple, "
             " hold_bars, max_favorable, max_adverse, tags, notes, "
-            " mistake_tags, execution_score, planned_risk_pct, entry_reason, exit_review, commission) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " mistake_tags, execution_score, planned_risk_pct, entry_reason, exit_review, commission,"
+            " snapshot_path, position_id, equity_before, equity_after) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 session_id,
                 trade.direction.value,
@@ -113,6 +114,10 @@ class StatsService:
                 trade.entry_reason,
                 trade.exit_review,
                 trade.commission,
+                trade.snapshot_path,
+                trade.position_id,
+                trade.equity_before,
+                trade.equity_after,
             ),
         )
 
@@ -253,6 +258,48 @@ class StatsService:
             params,
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def save_equity_snapshots(self, session_id: str, snapshots: list) -> None:
+        for snap in snapshots:
+            self._conn.execute(
+                "INSERT INTO equity_snapshots "
+                "(session_id, created_at, equity_before, equity_after, is_reset, bankruptcy_count) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    session_id,
+                    snap.timestamp.isoformat() if snap.timestamp else datetime.now().isoformat(),
+                    snap.equity_before,
+                    snap.equity_after,
+                    int(snap.is_reset),
+                    snap.bankruptcy_count,
+                ),
+            )
+        self._conn.commit()
+
+    def get_equity_snapshots(self, session_id: Optional[str] = None) -> list:
+        if session_id:
+            rows = self._conn.execute(
+                "SELECT * FROM equity_snapshots WHERE session_id=? ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM equity_snapshots ORDER BY created_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_bankruptcy_count(self) -> int:
+        row = self._conn.execute(
+            "SELECT MAX(bankruptcy_count) AS cnt FROM equity_snapshots"
+        ).fetchone()
+        return row["cnt"] or 0 if row else 0
+
+    def update_trade_snapshot(self, trade_id: int, snapshot_path: str) -> None:
+        self._conn.execute(
+            "UPDATE trades SET snapshot_path=? WHERE id=?",
+            (snapshot_path, trade_id),
+        )
+        self._conn.commit()
 
     def mark_mistake_retrained(self, mistake_id: int) -> None:
         self._conn.execute("UPDATE mistake_book SET retrained=1 WHERE id=?", (mistake_id,))

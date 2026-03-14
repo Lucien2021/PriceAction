@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -48,6 +50,8 @@ from app.training.trade_mode import TradeMode
 from app.ui.chart_bridge import ChartWidget
 from app.ui.review_panel import ReviewPanel
 
+_SNAPSHOT_DIR = Path.home() / ".priceaction" / "snapshots"
+
 _TF_OPTIONS = [
     ("月线", Timeframe.MONTHLY),
     ("日线", Timeframe.DAILY),
@@ -56,35 +60,22 @@ _TF_OPTIONS = [
 ]
 
 _SETUP_OPTIONS = [
-    "趋势回踩",
-    "区间突破",
-    "假突破反手",
-    "反转确认",
-    "供需区",
-    "自定义",
+    "趋势回踩", "区间突破", "假突破反手", "反转确认", "供需区", "自定义",
 ]
 
 _SCENARIO_OPTIONS = [
-    "",
-    "趋势回踩",
-    "区间突破",
-    "假突破",
-    "反转确认",
-    "震荡",
-    "高波动",
+    "", "趋势回踩", "区间突破", "假突破", "反转确认", "震荡", "高波动",
 ]
 
 _MISTAKE_TAGS = [
-    "追涨杀跌",
-    "过早止盈",
-    "拖延止损",
-    "计划外交易",
-    "错过入场",
-    "无效加仓",
-    "仓位过大",
-    "结构误判",
+    "追涨杀跌", "过早止盈", "拖延止损", "计划外交易",
+    "错过入场", "无效加仓", "仓位过大", "结构误判",
 ]
 
+
+# ======================================================================
+# Dialogs
+# ======================================================================
 
 class SessionPlanDialog(QDialog):
     def __init__(self, mode: TrainingMode, parent=None):
@@ -142,7 +133,7 @@ class SessionPlanDialog(QDialog):
         self._txt_notes.setMinimumHeight(120)
         self._txt_notes.setPlaceholderText(
             "交易模式：写入场逻辑、失效条件、预期出场。\n"
-            "PA 模式：写本次剧本推演，例如“先等假突破，再看收回确认”。"
+            "PA 模式: 写本次剧本推演, 例如[先等假突破, 再看收回确认]。"
         )
         layout.addWidget(QLabel("计划 / 剧本:"))
         layout.addWidget(self._txt_notes)
@@ -165,10 +156,10 @@ class SessionPlanDialog(QDialog):
 
 
 class TradeReviewDialog(QDialog):
-    def __init__(self, trade, parent=None):
+    def __init__(self, trade, snapshot_path: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("交易执行复盘")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(500)
 
         layout = QVBoxLayout(self)
         direction = "做多" if trade.direction == TradeDirection.LONG else "做空"
@@ -178,6 +169,15 @@ class TradeReviewDialog(QDialog):
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
+
+        if snapshot_path and Path(snapshot_path).exists():
+            from PySide6.QtGui import QPixmap
+            pix = QPixmap(snapshot_path)
+            if not pix.isNull():
+                img_label = QLabel()
+                img_label.setPixmap(pix.scaledToWidth(460, Qt.TransformationMode.SmoothTransformation))
+                img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(img_label)
 
         tag_group = QGroupBox("错误分类")
         tag_layout = QGridLayout(tag_group)
@@ -228,6 +228,10 @@ class TradeReviewDialog(QDialog):
         }
 
 
+# ======================================================================
+# Main Window
+# ======================================================================
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -247,9 +251,12 @@ class MainWindow(QMainWindow):
         self._pending_limit: Optional[dict] = None
         self._chart_loaded = False
         self._planned_risk_pct = 1.0
+        self._pending_review_trades: List = []
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_auto_advance)
+
+        _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
         self._connect_signals()
@@ -425,12 +432,24 @@ class MainWindow(QMainWindow):
         self._btn_sell.setMinimumHeight(32)
         self._btn_sell.setStyleSheet("background:#26a69a;color:white;font-weight:bold;")
         self._btn_sell.setEnabled(False)
-        self._btn_close = QPushButton("平仓")
+        self._btn_close = QPushButton("全平")
         self._btn_close.setMinimumHeight(32)
         btn_row.addWidget(self._btn_buy)
         btn_row.addWidget(self._btn_sell)
         btn_row.addWidget(self._btn_close)
         tb.addLayout(btn_row)
+
+        partial_row = QHBoxLayout()
+        self._btn_close_half = QPushButton("平1/2")
+        self._btn_close_half.setMinimumHeight(28)
+        self._btn_close_third = QPushButton("平1/3")
+        self._btn_close_third.setMinimumHeight(28)
+        self._btn_close_quarter = QPushButton("平1/4")
+        self._btn_close_quarter.setMinimumHeight(28)
+        partial_row.addWidget(self._btn_close_half)
+        partial_row.addWidget(self._btn_close_third)
+        partial_row.addWidget(self._btn_close_quarter)
+        tb.addLayout(partial_row)
 
         limit_row = QHBoxLayout()
         self._btn_limit_buy = QPushButton("限价买入")
@@ -447,9 +466,17 @@ class MainWindow(QMainWindow):
         limit_row.addWidget(self._btn_cancel_limit)
         tb.addLayout(limit_row)
 
+        review_row = QHBoxLayout()
+        self._btn_write_review = QPushButton("写本笔复盘")
+        self._btn_write_review.setMinimumHeight(28)
+        self._btn_write_review.setEnabled(False)
+        self._btn_write_review.setStyleSheet("background:#5b5bff;color:white;")
+        review_row.addWidget(self._btn_write_review)
+        tb.addLayout(review_row)
+
         self._lbl_trade_info = QLabel("无持仓")
         self._lbl_trade_info.setWordWrap(True)
-        self._lbl_trade_info.setMinimumHeight(70)
+        self._lbl_trade_info.setMinimumHeight(80)
         tb.addWidget(self._lbl_trade_info)
         layout.addWidget(self._trade_box)
 
@@ -557,6 +584,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self._chart.chart_ready.connect(self._on_chart_ready)
         self._chart.limit_price_changed.connect(self._on_limit_price_dragged)
+        self._chart.trade_line_changed.connect(self._on_trade_line_dragged)
         self._btn_download.clicked.connect(self._on_download)
         self._btn_start.clicked.connect(self._on_start_session)
         self._btn_finish.clicked.connect(self._on_finish_session)
@@ -573,15 +601,22 @@ class MainWindow(QMainWindow):
         self._btn_buy.clicked.connect(self._on_buy)
         self._btn_sell.clicked.connect(self._on_sell)
         self._btn_close.clicked.connect(self._on_close_position)
+        self._btn_close_half.clicked.connect(lambda: self._on_partial_close(1 / 2))
+        self._btn_close_third.clicked.connect(lambda: self._on_partial_close(1 / 3))
+        self._btn_close_quarter.clicked.connect(lambda: self._on_partial_close(1 / 4))
         self._btn_limit_buy.clicked.connect(self._on_limit_buy)
         self._btn_limit_sell.clicked.connect(self._on_limit_sell)
         self._btn_cancel_limit.clicked.connect(self._on_cancel_limit)
         self._btn_calc_qty.clicked.connect(self._on_calc_qty)
+        self._btn_write_review.clicked.connect(self._on_write_review)
 
         self._btn_up.clicked.connect(lambda: self._on_predict(PredictionDirection.UP))
         self._btn_down.clicked.connect(lambda: self._on_predict(PredictionDirection.DOWN))
         self._btn_side.clicked.connect(lambda: self._on_predict(PredictionDirection.SIDEWAYS))
         self._mode_group.idToggled.connect(self._on_mode_toggle)
+
+        self._spn_sl.valueChanged.connect(self._on_sl_spinbox_changed)
+        self._spn_tp.valueChanged.connect(self._on_tp_spinbox_changed)
 
     # ==================================================================
     # Handlers
@@ -605,7 +640,6 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         from datetime import datetime as _dt
-
         try:
             cnt = self._engine.ensure_data(symbol, tf, start_date="20100101", end_date=_dt.now().strftime("%Y%m%d"), force=True)
             self._lbl_status.setText(f"下载完成 {code} {tf.label}: {cnt} 根K线")
@@ -636,10 +670,8 @@ class MainWindow(QMainWindow):
 
         try:
             visible, future = self._engine.random_slice(
-                symbol,
-                tf,
-                self._spn_visible.value(),
-                self._spn_future.value(),
+                symbol, tf,
+                self._spn_visible.value(), self._spn_future.value(),
                 scenario_tag=plan["scenario_tag"],
             )
         except ValueError as exc:
@@ -660,6 +692,8 @@ class MainWindow(QMainWindow):
         self._spn_risk_pct.setValue(plan["risk_pct"])
         self._trade_mode = TradeMode(self._session, rules=self._rules) if mode == TrainingMode.TRADE else None
         self._predict_mode = PredictMode(self._session) if mode == TrainingMode.PREDICT else None
+        self._pending_review_trades.clear()
+        self._btn_write_review.setEnabled(False)
 
         self._btn_sell.setEnabled(self._rules.allows_short())
         self._btn_limit_sell.setEnabled(self._rules.allows_short())
@@ -668,6 +702,7 @@ class MainWindow(QMainWindow):
         self._chart.set_candles(visible)
         self._chart.set_ma_data(visible)
         self._chart.clear_drawings()
+        self._chart.remove_all_trade_lines()
         self._refresh_markers()
         self._update_bar_label()
         self._update_live_stats()
@@ -783,6 +818,7 @@ class MainWindow(QMainWindow):
             return
         pos = self._trade_mode.open_long(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
         if pos:
+            self._show_trade_lines()
             self._update_position_display()
 
     def _on_sell(self):
@@ -793,6 +829,7 @@ class MainWindow(QMainWindow):
             return
         pos = self._trade_mode.open_short(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
         if pos:
+            self._show_trade_lines()
             self._update_position_display()
 
     def _on_close_position(self):
@@ -802,20 +839,154 @@ class MainWindow(QMainWindow):
         if closed:
             self._on_trade_closed(closed)
 
-    def _on_trade_closed(self, trade):
+    def _on_partial_close(self, ratio: float):
+        if not self._trade_mode:
+            return
+        pos = self._session.position
+        if pos is None:
+            QMessageBox.information(self, "提示", "当前无持仓")
+            return
+        closed = self._trade_mode.close_partial(ratio, "partial")
+        if closed:
+            self._on_trade_closed(closed, is_partial=True)
+
+    def _on_trade_closed(self, trade, is_partial: bool = False):
         trade.planned_risk_pct = self._spn_risk_pct.value()
-        review = TradeReviewDialog(trade, self)
+        if not is_partial or self._session.position is None:
+            self._chart.remove_all_trade_lines()
+        self._chart.remove_all_limits()
+        self._pending_limit = None
+        self._refresh_markers()
+        self._update_position_display()
+        self._update_live_stats()
+
+        if self._trade_mode and self._trade_mode.capital < 2000:
+            self._lbl_status.setText(
+                f"破产! 资金低于2000，已重置为100,000 (第{self._trade_mode.bankruptcy_count}次)"
+            )
+
+        self._pending_review_trades.append(trade)
+        self._btn_write_review.setEnabled(True)
+        self._lbl_status.setText("已标记买卖点，请观察后点击【写本笔复盘】")
+
+    # ------------------------------------------------------------------
+    # Deferred review
+    # ------------------------------------------------------------------
+
+    def _on_write_review(self):
+        if not self._pending_review_trades:
+            return
+        trade = self._pending_review_trades.pop(0)
+
+        self._take_trade_snapshot(trade, self._open_review_for_trade)
+
+    def _take_trade_snapshot(self, trade, callback):
+        tf = self._session.timeframe or Timeframe.DAILY
+        entry_markers = self._chart.build_trade_markers([trade], tf)
+
+        buf_before = 10
+        buf_after = 5
+        start_idx = max(0, trade.entry_bar_index - buf_before)
+        end_idx = trade.exit_bar_index + buf_after
+        self._chart.prepare_snapshot(start_idx, end_idx, entry_markers)
+
+        self._snapshot_trade = trade
+        self._snapshot_callback = callback
+        QTimer.singleShot(400, self._do_capture_snapshot)
+
+    def _do_capture_snapshot(self):
+        self._chart.capture_image(self._on_snapshot_captured)
+
+    def _on_snapshot_captured(self, data_url: str):
+        trade = self._snapshot_trade
+        callback = self._snapshot_callback
+        snap_path = ""
+
+        if data_url and data_url.startswith("data:image/png;base64,"):
+            raw = data_url.split(",", 1)[1]
+            img_bytes = base64.b64decode(raw)
+            fname = f"{self._session.session_id}_{trade.entry_bar_index}_{trade.exit_bar_index}.png"
+            snap_path = str(_SNAPSHOT_DIR / fname)
+            try:
+                with open(snap_path, "wb") as f:
+                    f.write(img_bytes)
+                trade.snapshot_path = snap_path
+            except Exception:
+                snap_path = ""
+
+        self._restore_full_chart()
+        callback(trade, snap_path)
+
+    def _restore_full_chart(self):
+        tf = self._session.timeframe or Timeframe.DAILY
+        all_markers = self._chart.build_trade_markers(self._session.closed_trades, tf)
+        self._chart.set_markers(all_markers)
+        self._chart._run_js("fitContent()")
+
+    def _open_review_for_trade(self, trade, snapshot_path: str):
+        review = TradeReviewDialog(trade, snapshot_path, self)
         if review.exec() == QDialog.DialogCode.Accepted:
             result = review.get_review()
             trade.mistake_tags = result["mistake_tags"]
             trade.execution_score = result["execution_score"]
             trade.entry_reason = result["entry_reason"]
             trade.exit_review = result["exit_review"]
-        self._chart.remove_all_limits()
-        self._pending_limit = None
-        self._refresh_markers()
+
+        if not self._pending_review_trades:
+            self._btn_write_review.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Dynamic SL/TP lines
+    # ------------------------------------------------------------------
+
+    def _show_trade_lines(self):
+        pos = self._session.position
+        if pos is None:
+            return
+        self._chart.remove_all_trade_lines()
+        self._chart.add_trade_line("entry_line", pos.entry_price, "entry", "#FFD700")
+        if pos.stop_loss:
+            self._chart.add_trade_line("sl_line", pos.stop_loss, "stop_loss", "#ef5350")
+        if pos.take_profit:
+            self._chart.add_trade_line("tp_line", pos.take_profit, "take_profit", "#26a69a")
+
+    def _on_trade_line_dragged(self, line_id: str, new_price: float):
+        pos = self._session.position
+        if pos is None:
+            return
+        if line_id == "sl_line":
+            pos.update_stop_loss(new_price)
+            self._spn_sl.blockSignals(True)
+            self._spn_sl.setValue(new_price)
+            self._spn_sl.blockSignals(False)
+        elif line_id == "tp_line":
+            pos.update_take_profit(new_price)
+            self._spn_tp.blockSignals(True)
+            self._spn_tp.setValue(new_price)
+            self._spn_tp.blockSignals(False)
         self._update_position_display()
-        self._update_live_stats()
+
+    def _on_sl_spinbox_changed(self, value: float):
+        pos = self._session.position
+        if pos is None:
+            return
+        pos.update_stop_loss(value if value > 0 else None)
+        if value > 0:
+            self._chart.add_trade_line("sl_line", value, "stop_loss", "#ef5350")
+        else:
+            self._chart.remove_trade_line("sl_line")
+        self._update_position_display()
+
+    def _on_tp_spinbox_changed(self, value: float):
+        pos = self._session.position
+        if pos is None:
+            return
+        pos.update_take_profit(value if value > 0 else None)
+        if value > 0:
+            self._chart.add_trade_line("tp_line", value, "take_profit", "#26a69a")
+        else:
+            self._chart.remove_trade_line("tp_line")
+        self._update_position_display()
 
     # ------------------------------------------------------------------
     # Limit orders
@@ -882,6 +1053,7 @@ class MainWindow(QMainWindow):
         pos.entry_price = price
         self._chart.remove_limit_order(self._pending_limit["id"])
         self._pending_limit = None
+        self._show_trade_lines()
         self._update_position_display()
         self._lbl_status.setText(f"限价委托成交 @ {price:.2f}")
 
@@ -904,10 +1076,21 @@ class MainWindow(QMainWindow):
             return
 
         self._on_pause()
+
+        if self._pending_review_trades:
+            ans = QMessageBox.question(
+                self, "待复盘交易",
+                f"还有 {len(self._pending_review_trades)} 笔交易未写复盘。\n是否先写复盘再结束?",
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                self._on_write_review()
+                return
+
         if self._session.position and self._trade_mode:
             closed = self._trade_mode.close("session_end")
             if closed:
-                self._on_trade_closed(closed)
+                closed.planned_risk_pct = self._spn_risk_pct.value()
+                self._session.closed_trades.append(closed) if closed not in self._session.closed_trades else None
         self._session.finish()
         if self._predict_mode:
             self._session.evaluate_predictions()
@@ -917,10 +1100,20 @@ class MainWindow(QMainWindow):
     def _finish_with_drawings(self, drawings: list):
         self._session.score = self._compute_session_score(drawings)
         self._stats_service.save_session(self._session)
+
+        if self._trade_mode:
+            self._stats_service.save_equity_snapshots(
+                self._session.session_id,
+                self._trade_mode.equity_snapshots,
+            )
+
         self._persist_drawings(drawings)
         self._persist_mistake_book(drawings)
+        self._chart.remove_all_trade_lines()
         self._review_panel.refresh()
         self._update_live_stats()
+        self._pending_review_trades.clear()
+        self._btn_write_review.setEnabled(False)
         self._lbl_status.setText("训练已保存")
         QMessageBox.information(self, "训练结束", "训练记录已保存。\n切换到 [复盘] 查看统计、错误分类和 PA 标注。")
 
@@ -963,8 +1156,7 @@ class MainWindow(QMainWindow):
             if trade.mistake_tags:
                 self._stats_service.save_mistake(
                     session_id=self._session.session_id,
-                    symbol=symbol,
-                    timeframe=timeframe,
+                    symbol=symbol, timeframe=timeframe,
                     category="trade",
                     setup_type=self._session.setup_type,
                     mistake_tags=trade.mistake_tags,
@@ -986,8 +1178,7 @@ class MainWindow(QMainWindow):
             if pa_tags:
                 self._stats_service.save_mistake(
                     session_id=self._session.session_id,
-                    symbol=symbol,
-                    timeframe=timeframe,
+                    symbol=symbol, timeframe=timeframe,
                     category="pa",
                     setup_type=self._session.setup_type,
                     mistake_tags=pa_tags,
@@ -1050,8 +1241,10 @@ class MainWindow(QMainWindow):
     def _update_position_display(self):
         pos = self._session.position
         if pos is None:
-            self._lbl_trade_info.setText("无持仓")
-            self._lbl_position.setText("")
+            cap = f"资金: {self._trade_mode.capital:,.0f}" if self._trade_mode else ""
+            self._lbl_trade_info.setText(f"无持仓\n{cap}")
+            self._lbl_position.setText(cap)
+            self._chart.remove_all_trade_lines()
             return
         candle = self._session.current_candle
         current_price = candle.close if candle else pos.entry_price
@@ -1059,19 +1252,22 @@ class MainWindow(QMainWindow):
         pct = pos.unrealized_pnl_pct(current_price)
         r_val = pos.unrealized_r(current_price)
         r_text = f"  {r_val:.2f}R" if r_val is not None else ""
+        rr = pos.reward_risk_ratio(current_price)
+        rr_text = f"  盈亏比: {rr}" if rr is not None else ""
         direction = "多" if pos.is_long else "空"
+        cap_text = f"资金: {self._trade_mode.capital:,.0f}" if self._trade_mode else ""
         self._lbl_trade_info.setText(
-            f"方向: {direction}  入场: {pos.entry_price:.2f}\n"
-            f"浮动盈亏: {pnl:+.2f} ({pct:+.2f}%){r_text}\n"
-            f"止损: {pos.stop_loss or '无'}  止盈: {pos.take_profit or '无'}  风险: {self._spn_risk_pct.value():.2f}%"
+            f"方向: {direction}  入场: {pos.entry_price:.2f}  数量: {pos.quantity}\n"
+            f"浮盈: {pnl:+.2f} ({pct:+.2f}%){r_text}{rr_text}\n"
+            f"SL: {pos.stop_loss or '无'}  TP: {pos.take_profit or '无'}  风险: {self._spn_risk_pct.value():.2f}%\n"
+            f"{cap_text}"
         )
         self._lbl_position.setText(f"持仓 {direction} {pnl:+.2f}")
 
     def _update_live_stats(self):
         if self._trade_mode:
-            stats = self._trade_mode.compute_stats()
             self._lbl_live_stats.setText(self._trade_mode.summary_text())
-            score = self._session.score or round(stats.win_rate * 100)
+            score = self._session.score or round(self._trade_mode.compute_stats().win_rate * 100)
             self._lbl_score.setText(f"会话分数 {score}")
         elif self._predict_mode:
             result = self._predict_mode.get_result()
