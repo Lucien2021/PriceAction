@@ -245,6 +245,54 @@ function findTradeLineNear(y){
 /* ================================================================
    SCREENSHOT (render specific bar range)
    ================================================================ */
+var _snapshotOverlays=[];
+function addSnapshotOverlay(entryTime,entryPrice,exitTime,exitPrice,slPrice,tpPrice,isLong){
+  _snapshotOverlays.push({et:entryTime,ep:entryPrice,xt:exitTime,xp:exitPrice,sl:slPrice,tp:tpPrice,long:isLong});
+}
+function clearSnapshotOverlays(){_snapshotOverlays=[];}
+function renderSnapshotOverlays(){
+  if(!ctx||!canvas||!_snapshotOverlays.length)return;
+  for(var i=0;i<_snapshotOverlays.length;i++){
+    var o=_snapshotOverlays[i];
+    var x1=timeValToX(o.et),y1=priceToY(o.ep);
+    var x2=timeValToX(o.xt),y2=priceToY(o.xp);
+    if(x1==null||x2==null||y1==null||y2==null)continue;
+    ctx.save();
+    var win=(o.long?(o.xp>o.ep):(o.ep>o.xp));
+    ctx.strokeStyle=win?'#26a69a':'#ef5350';
+    ctx.lineWidth=2;ctx.setLineDash([6,4]);
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=o.long?'#ef5350':'#26a69a';
+    ctx.beginPath();ctx.arc(x1,y1,5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=win?'#26a69a':'#ef5350';
+    ctx.beginPath();ctx.arc(x2,y2,5,0,Math.PI*2);ctx.fill();
+    if(o.sl){
+      var ysl=priceToY(o.sl);
+      if(ysl!=null){
+        ctx.strokeStyle='#ef535080';ctx.lineWidth=1;ctx.setLineDash([4,3]);
+        ctx.beginPath();ctx.moveTo(x1,ysl);ctx.lineTo(x2,ysl);ctx.stroke();
+        ctx.setLineDash([]);ctx.fillStyle='#ef5350';ctx.font='10px sans-serif';
+        ctx.fillText('SL '+o.sl.toFixed(2),x1+4,ysl-3);
+      }
+    }
+    if(o.tp){
+      var ytp=priceToY(o.tp);
+      if(ytp!=null){
+        ctx.strokeStyle='#26a69a80';ctx.lineWidth=1;ctx.setLineDash([4,3]);
+        ctx.beginPath();ctx.moveTo(x1,ytp);ctx.lineTo(x2,ytp);ctx.stroke();
+        ctx.setLineDash([]);ctx.fillStyle='#26a69a';ctx.font='10px sans-serif';
+        ctx.fillText('TP '+o.tp.toFixed(2),x1+4,ytp-3);
+      }
+    }
+    ctx.restore();
+  }
+}
+function timeValToX(tv){
+  if(!chart||!candleSeries)return null;
+  var tc=chart.timeScale().timeToCoordinate(tv);
+  return(tc!=null&&!isNaN(tc))?tc:null;
+}
 function takeSnapshot(startIdx,endIdx,markers){
   if(!chart||!candleSeries)return '';
   chart.timeScale().setVisibleLogicalRange({from:startIdx-5,to:endIdx+5});
@@ -255,12 +303,15 @@ function getChartImage(){
   var el=document.getElementById('chart');
   var cvs=el.querySelector('canvas');
   if(!cvs)return '';
+  renderSnapshotOverlays();
   var merged=document.createElement('canvas');
   merged.width=el.offsetWidth;merged.height=el.offsetHeight;
   var mctx=merged.getContext('2d');
   var canvases=el.querySelectorAll('canvas');
   for(var i=0;i<canvases.length;i++){mctx.drawImage(canvases[i],0,0)}
   if(canvas&&ctx){mctx.drawImage(canvas,0,0)}
+  clearSnapshotOverlays();
+  renderAll();
   return merged.toDataURL('image/png');
 }
 

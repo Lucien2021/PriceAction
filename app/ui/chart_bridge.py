@@ -215,6 +215,23 @@ class ChartWidget(QWebEngineView):
     # Screenshot
     # ------------------------------------------------------------------
 
+    def add_snapshot_overlay(
+        self, entry_time, entry_price: float,
+        exit_time, exit_price: float,
+        sl: float = 0, tp: float = 0, is_long: bool = True,
+    ) -> None:
+        et = json.dumps(entry_time)
+        xt = json.dumps(exit_time)
+        sl_val = sl or 0
+        tp_val = tp or 0
+        self._run_js(
+            f"addSnapshotOverlay({et},{entry_price},{xt},{exit_price},"
+            f"{sl_val},{tp_val},{'true' if is_long else 'false'})"
+        )
+
+    def clear_snapshot_overlays(self) -> None:
+        self._run_js("clearSnapshotOverlays()")
+
     def prepare_snapshot(self, start_idx: int, end_idx: int, markers: list) -> None:
         mk = json.dumps(markers, ensure_ascii=False)
         self._run_js(f"takeSnapshot({start_idx},{end_idx},{mk})")

@@ -929,9 +929,22 @@ class MainWindow(QMainWindow):
         end_idx = trade.exit_bar_index + buf_after
         self._chart.prepare_snapshot(start_idx, end_idx, entry_markers)
 
+        if tf.minutes >= Timeframe.DAILY.minutes:
+            et = trade.entry_time.strftime("%Y-%m-%d")
+            xt = trade.exit_time.strftime("%Y-%m-%d")
+        else:
+            et = int(trade.entry_time.timestamp())
+            xt = int(trade.exit_time.timestamp())
+        is_long = trade.direction.value == "long"
+        self._chart.add_snapshot_overlay(
+            et, trade.entry_price, xt, trade.exit_price,
+            sl=trade.stop_loss or 0, tp=trade.take_profit or 0,
+            is_long=is_long,
+        )
+
         self._snapshot_trade = trade
         self._snapshot_callback = callback
-        QTimer.singleShot(400, self._do_capture_snapshot)
+        QTimer.singleShot(500, self._do_capture_snapshot)
 
     def _do_capture_snapshot(self):
         self._chart.capture_image(self._on_snapshot_captured)
@@ -957,6 +970,7 @@ class MainWindow(QMainWindow):
         callback(trade, snap_path)
 
     def _restore_full_chart(self):
+        self._chart.clear_snapshot_overlays()
         tf = self._session.timeframe or Timeframe.DAILY
         all_markers = self._chart.build_trade_markers(self._session.closed_trades, tf)
         self._chart.set_markers(all_markers)
