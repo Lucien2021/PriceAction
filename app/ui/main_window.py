@@ -719,7 +719,17 @@ class MainWindow(QMainWindow):
 
         self._planned_risk_pct = plan["risk_pct"]
         self._spn_risk_pct.setValue(plan["risk_pct"])
-        self._trade_mode = TradeMode(self._session, rules=self._rules) if mode == TrainingMode.TRADE else None
+        if mode == TrainingMode.TRADE:
+            persisted_capital = self._stats_service.get_last_equity()
+            persisted_bankruptcy = self._stats_service.get_bankruptcy_count()
+            self._trade_mode = TradeMode(
+                self._session,
+                initial_capital=persisted_capital,
+                bankruptcy_count=persisted_bankruptcy,
+                rules=self._rules,
+            )
+        else:
+            self._trade_mode = None
         self._predict_mode = PredictMode(self._session) if mode == TrainingMode.PREDICT else None
         self._pending_review_trades.clear()
         self._btn_write_review.setEnabled(False)

@@ -53,6 +53,7 @@ class TradeMode:
         self,
         session: ReplaySession,
         initial_capital: float = INITIAL_CAPITAL,
+        bankruptcy_count: int = 0,
         rules: Optional[MarketRules] = None,
         slippage_pct: float = 0.0005,
         use_commission: bool = True,
@@ -61,7 +62,7 @@ class TradeMode:
         self._initial_capital = initial_capital
         self._capital = initial_capital
         self._peak_equity = initial_capital
-        self._bankruptcy_count = 0
+        self._bankruptcy_count = bankruptcy_count
         self._equity_snapshots: List[EquitySnapshot] = []
         self._rules = rules or AShareRules()
         self._slippage_pct = slippage_pct

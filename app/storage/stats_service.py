@@ -294,6 +294,31 @@ class StatsService:
         ).fetchone()
         return row["cnt"] or 0 if row else 0
 
+    def get_last_equity(self) -> float:
+        """Return the most recent equity_after across all sessions."""
+        row = self._conn.execute(
+            "SELECT equity_after FROM equity_snapshots ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        return row["equity_after"] if row else 100000.0
+
+    def get_full_equity_curve(self) -> List[Dict[str, Any]]:
+        """Get all equity points joined with trade details for the curve."""
+        rows = self._conn.execute(
+            "SELECT e.id, e.session_id, e.created_at, e.equity_before, e.equity_after, "
+            "       e.is_reset, e.bankruptcy_count, "
+            "       t.direction, t.entry_price, t.exit_price, t.quantity, "
+            "       t.pnl, t.pnl_pct, t.r_multiple, t.exit_reason, "
+            "       t.entry_time, t.exit_time, t.snapshot_path, "
+            "       t.entry_reason, t.exit_review, t.stop_loss, t.take_profit, "
+            "       s.symbol, s.timeframe, s.setup_type "
+            "FROM equity_snapshots e "
+            "LEFT JOIN trades t ON e.session_id = t.session_id "
+            "    AND t.exit_time = e.created_at "
+            "LEFT JOIN sessions s ON e.session_id = s.id "
+            "ORDER BY e.created_at"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def update_trade_snapshot(self, trade_id: int, snapshot_path: str) -> None:
         self._conn.execute(
             "UPDATE trades SET snapshot_path=? WHERE id=?",

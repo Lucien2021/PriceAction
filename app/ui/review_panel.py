@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.storage.stats_service import AggregateStats, StatsService
+from app.ui.equity_curve import EquityCurveWidget
 
 PA_TAGS = [
     "Pin Bar", "Engulfing", "Inside Bar", "Outside Bar",
@@ -188,6 +189,12 @@ class ReviewPanel(QWidget):
         self._lbl_drilldown.setMinimumHeight(160)
         drill_lay.addWidget(self._lbl_drilldown)
 
+        self._equity_group = QGroupBox("资金曲线 (悬浮查看详情, 点击查看截图)")
+        eq_lay = QVBoxLayout(self._equity_group)
+        self._equity_curve = EquityCurveWidget()
+        self._equity_curve.setMinimumHeight(280)
+        eq_lay.addWidget(self._equity_curve)
+
         self._extra_group = QGroupBox("训练建议")
         extra_lay = QVBoxLayout(self._extra_group)
         self._lbl_extra = QTextBrowser()
@@ -196,6 +203,7 @@ class ReviewPanel(QWidget):
 
         layout.addLayout(filters)
         layout.addLayout(btn_row)
+        layout.addWidget(self._equity_group)
         layout.addWidget(self._stats_group)
         layout.addWidget(self._drill_group)
         layout.addWidget(self._extra_group)
@@ -394,6 +402,7 @@ class ReviewPanel(QWidget):
         tf = self._filter_tf.currentData() or None
         agg = self._stats.get_overall_stats(symbol=sym, timeframe=tf)
         self._update_summary(agg)
+        self._update_equity_curve()
         self._update_drilldown(sym, tf)
         self._update_journal(sym, tf)
         self._update_sessions(sym, tf)
@@ -426,16 +435,21 @@ class ReviewPanel(QWidget):
         r_str = f"{agg.avg_r:.2f}R" if agg.avg_r is not None else "N/A"
         pf = "N/A" if agg.profit_factor == float("inf") else f"{agg.profit_factor:.2f}"
         bankruptcy = self._stats.get_bankruptcy_count()
+        current_equity = self._stats.get_last_equity()
         lines = [
+            f"当前资金: {current_equity:,.0f}    破产次数: {bankruptcy}",
             f"训练场次: {agg.total_sessions}    总交易: {agg.total_trades}",
             f"胜率: {agg.win_rate:.1%}    ({agg.winners}胜 / {agg.losers}负)",
             f"平均R: {r_str}    PF: {pf}",
             f"期望值: {agg.expectancy:.2f}%    净盈亏: {agg.total_pnl:+.2f}",
             f"手续费: {agg.total_commission:.2f}    最大回撤: {agg.max_drawdown_pct:.2f}%",
-            f"破产次数: {bankruptcy}",
             f"预测: {agg.total_predictions}次  正确: {agg.correct_predictions}  准确率: {agg.prediction_accuracy:.1%}",
         ]
         self._lbl_summary.setPlainText("\n".join(lines))
+
+    def _update_equity_curve(self):
+        curve_data = self._stats.get_full_equity_curve()
+        self._equity_curve.set_data(curve_data)
 
     def _update_drilldown(self, sym: Optional[str], tf: Optional[str]):
         setup = self._stats.get_stats_by_setup(symbol=sym, timeframe=tf)
