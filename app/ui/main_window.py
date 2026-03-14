@@ -1055,7 +1055,7 @@ class MainWindow(QMainWindow):
         if not candle:
             return
         price = round(candle.close * 0.99, 2)
-        self._pending_limit = {"id": "limit_buy", "price": price, "direction": "long"}
+        self._pending_limit = {"id": "limit_buy", "price": price, "direction": "long", "order_close": candle.close}
         self._chart.add_limit_order("limit_buy", price, "long", "#ef5350")
         self._lbl_trade_info.setText(f"限价买入委托: {price:.2f}\n(拖动线调整价格)")
 
@@ -1069,7 +1069,7 @@ class MainWindow(QMainWindow):
         if not candle:
             return
         price = round(candle.close * 1.01, 2)
-        self._pending_limit = {"id": "limit_sell", "price": price, "direction": "short"}
+        self._pending_limit = {"id": "limit_sell", "price": price, "direction": "short", "order_close": candle.close}
         self._chart.add_limit_order("limit_sell", price, "short", "#26a69a")
         self._lbl_trade_info.setText(f"限价卖出委托: {price:.2f}\n(拖动线调整价格)")
 
@@ -1089,13 +1089,33 @@ class MainWindow(QMainWindow):
         if not self._pending_limit or not self._trade_mode or self._session.position:
             return
         price = self._pending_limit["price"]
-        if not (candle.low <= price <= candle.high):
+        direction = self._pending_limit["direction"]
+        order_close = self._pending_limit.get("order_close", price)
+
+        if direction == "long":
+            if price > order_close:
+                triggered = candle.high >= price
+            else:
+                triggered = candle.low <= price
+        else:
+            if price < order_close:
+                triggered = candle.low <= price
+            else:
+                triggered = candle.high >= price
+
+        if not triggered:
             return
-        qty = self._resolve_quantity(price)
+
+        if candle.low <= price <= candle.high:
+            fill_price = price
+        else:
+            fill_price = candle.open
+
+        qty = self._resolve_quantity(fill_price)
         if not qty:
             return
 
-        if self._pending_limit["direction"] == "long":
+        if direction == "long":
             pos = self._trade_mode.open_long(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
         else:
             pos = self._trade_mode.open_short(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
@@ -1103,12 +1123,12 @@ class MainWindow(QMainWindow):
         if not pos:
             return
 
-        pos.entry_price = price
+        pos.entry_price = fill_price
         self._chart.remove_limit_order(self._pending_limit["id"])
         self._pending_limit = None
         self._show_trade_lines()
         self._update_position_display()
-        self._lbl_status.setText(f"限价委托成交 @ {price:.2f}")
+        self._lbl_status.setText(f"限价委托成交 @ {fill_price:.2f}")
 
     # ------------------------------------------------------------------
     # Predict / PA
