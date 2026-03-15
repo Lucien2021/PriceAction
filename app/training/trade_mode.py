@@ -167,10 +167,19 @@ class TradeMode:
     # Close (full)
     # ------------------------------------------------------------------
 
-    def close(self, reason: str = "manual") -> Optional[ClosedTrade]:
+    def close(
+        self,
+        reason: str = "manual",
+        trigger_candle: Optional[Candle] = None,
+        trigger_bar_index: Optional[int] = None,
+    ) -> Optional[ClosedTrade]:
         equity_before = self._capital
         entry_comm = self._entry_commission
-        trade = self._session.close_position(reason)
+        trade = self._session.close_position(
+            reason,
+            trigger_candle=trigger_candle,
+            trigger_bar_index=trigger_bar_index,
+        )
         if trade:
             if self._slippage_pct > 0:
                 is_buy_to_close = trade.direction == TradeDirection.SHORT
@@ -299,13 +308,19 @@ class TradeMode:
 
     def advance_and_check(self, steps: int = 1) -> Optional[ClosedTrade]:
         revealed = self._session.advance(steps)
-        for candle in revealed:
+        n = len(revealed)
+        for i, candle in enumerate(revealed):
             pos = self._session.position
             if pos is None:
                 continue
             if pos.should_stop_loss(candle):
                 sl_price = pos.stop_loss
-                trade = self.close("stop_loss")
+                trigger_bar = self._session.absolute_bar_index - n + i
+                trade = self.close(
+                    "stop_loss",
+                    trigger_candle=candle,
+                    trigger_bar_index=trigger_bar,
+                )
                 if trade and sl_price is not None:
                     old_pnl = trade.pnl
                     trade.exit_price = sl_price
@@ -313,7 +328,12 @@ class TradeMode:
                 return trade
             if pos.should_take_profit(candle):
                 tp_price = pos.take_profit
-                trade = self.close("take_profit")
+                trigger_bar = self._session.absolute_bar_index - n + i
+                trade = self.close(
+                    "take_profit",
+                    trigger_candle=candle,
+                    trigger_bar_index=trigger_bar,
+                )
                 if trade and tp_price is not None:
                     old_pnl = trade.pnl
                     trade.exit_price = tp_price

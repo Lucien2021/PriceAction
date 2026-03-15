@@ -158,12 +158,18 @@ class ReplaySession:
         )
         return self.position
 
-    def close_position(self, reason: str = "manual") -> Optional[ClosedTrade]:
+    def close_position(
+        self,
+        reason: str = "manual",
+        trigger_candle: Optional[Candle] = None,
+        trigger_bar_index: Optional[int] = None,
+    ) -> Optional[ClosedTrade]:
         if self.position is None:
             return None
-        candle = self.current_candle
+        candle = trigger_candle if trigger_candle is not None else self.current_candle
         if candle is None:
             return None
+        bar_index = trigger_bar_index if trigger_bar_index is not None else self.absolute_bar_index
         trade = ClosedTrade(
             direction=self.position.direction,
             entry_price=self.position.entry_price,
@@ -172,7 +178,7 @@ class ReplaySession:
             entry_time=self.position.entry_time or candle.timestamp,
             exit_time=candle.timestamp,
             entry_bar_index=self.position.entry_bar_index,
-            exit_bar_index=self.absolute_bar_index,
+            exit_bar_index=bar_index,
             stop_loss=self.position.stop_loss,
             take_profit=self.position.take_profit,
             exit_reason=reason,
