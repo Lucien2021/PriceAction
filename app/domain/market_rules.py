@@ -61,7 +61,7 @@ class MarketRules(ABC):
 
     def calculate_commission(self, price: float, quantity: int, is_sell: bool) -> float:
         rule = self.fee_rule()
-        turnover = price * quantity * self.contract_multiplier()
+        turnover = abs(price) * quantity * self.contract_multiplier()
         commission = max(turnover * rule.commission_rate, rule.min_commission)
         if is_sell:
             commission += turnover * rule.stamp_tax_rate

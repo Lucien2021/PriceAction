@@ -111,7 +111,7 @@ class TradeMode:
         return qty
 
     def _apply_slippage(self, price: float, is_buy: bool) -> float:
-        slip = price * self._slippage_pct
+        slip = abs(price) * self._slippage_pct
         return round(price + slip, 2) if is_buy else round(price - slip, 2)
 
     def _calc_commission(self, price: float, quantity: int, is_sell: bool) -> float:

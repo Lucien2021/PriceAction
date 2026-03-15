@@ -64,20 +64,7 @@ class ReplayEngine:
         return counts
 
     def load_all(self, symbol: Symbol, timeframe: Timeframe) -> List[Candle]:
-        return self._trim_negative_qfq(self._cache.load_candles(symbol, timeframe))
-
-    @staticmethod
-    def _trim_negative_qfq(candles: List[Candle]) -> List[Candle]:
-        """Drop leading candles whose qfq-adjusted prices went negative.
-
-        For stocks with persistent dividends, forward-adjusted (qfq) prices
-        can become negative for very early history.  Find the first bar where
-        all OHLC values are positive and keep everything from there onward.
-        """
-        for i, c in enumerate(candles):
-            if c.open > 0 and c.high > 0 and c.low > 0 and c.close > 0:
-                return candles[i:]
-        return []
+        return self._cache.load_candles(symbol, timeframe)
 
     def random_slice(
         self,
@@ -90,7 +77,6 @@ class ReplayEngine:
         scenario_tag: str = "",
     ) -> Tuple[List[Candle], List[Candle]]:
         all_candles = self._cache.load_candles(symbol, timeframe)
-        all_candles = self._trim_negative_qfq(all_candles)
         if date_start or date_end:
             all_candles = [
                 c for c in all_candles

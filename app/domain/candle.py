@@ -134,7 +134,7 @@ class Position:
         diff = current_price - self.entry_price
         if not self.is_long:
             diff = -diff
-        return diff / self.entry_price * 100
+        return diff / abs(self.entry_price) * 100
 
     def unrealized_r(self, current_price: float) -> Optional[float]:
         if self.stop_loss is None or self.stop_loss == self.entry_price:
@@ -209,7 +209,7 @@ class ClosedTrade:
         diff = self.exit_price - self.entry_price
         if self.direction == TradeDirection.SHORT:
             diff = -diff
-        return diff / self.entry_price * 100
+        return diff / abs(self.entry_price) * 100
 
     @property
     def is_winner(self) -> bool:
