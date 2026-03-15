@@ -107,7 +107,7 @@ class ChartWidget(QWebEngineView):
                 t = c.timestamp.strftime("%Y-%m-%d")
             else:
                 t = int(c.timestamp.timestamp())
-            ma_data.append({"time": t, "value": round(avg, 2)})
+            ma_data.append({"time": t, "value": round(avg, 4)})
         self._run_js(f"setMAData({json.dumps(ma_data)})")
 
     def add_ma_point(self, candles: List[Candle], period: int = 20) -> None:
@@ -120,7 +120,7 @@ class ChartWidget(QWebEngineView):
             t = c.timestamp.strftime("%Y-%m-%d")
         else:
             t = int(c.timestamp.timestamp())
-        self._run_js(f"addMAPoint({json.dumps({'time': t, 'value': round(avg, 2)})})")
+        self._run_js(f"addMAPoint({json.dumps({'time': t, 'value': round(avg, 4)})})")
 
     def _time_key(self, c: Candle) -> str:
         if self._timeframe.minutes >= Timeframe.DAILY.minutes:
