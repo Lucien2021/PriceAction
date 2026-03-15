@@ -130,8 +130,8 @@ class ChartWidget(QWebEngineView):
     _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
     def _candle_extra(self, c: Candle, prev_close: float) -> dict:
-        change = round(c.close - prev_close, 2) if prev_close else 0
-        change_pct = round(change / prev_close * 100, 2) if prev_close else 0
+        change = round(c.close - prev_close, 2) if prev_close and prev_close > 0 else 0
+        change_pct = round(change / prev_close * 100, 2) if prev_close and prev_close > 0 else 0
         return {
             "date": c.timestamp.strftime("%Y/%m/%d"),
             "weekday": self._WEEKDAYS[c.timestamp.weekday()],

@@ -216,10 +216,10 @@ class AKShareProvider:
         result = {}
 
         cn_map = {
-            "open": ["开盘", "open", "Open"],
-            "high": ["最高", "high", "High"],
-            "low": ["最低", "low", "Low"],
-            "close": ["收盘", "close", "Close"],
+            "open": ["开盘", "开盘价", "今开", "open", "Open"],
+            "high": ["最高", "最高价", "high", "High"],
+            "low": ["最低", "最低价", "low", "Low"],
+            "close": ["收盘", "收盘价", "close", "Close"],
             "volume": ["成交量", "volume", "Volume", "vol"],
             "turnover": ["成交额", "turnover", "amount"],
         }
@@ -231,7 +231,13 @@ class AKShareProvider:
                     break
 
         if len(result) < 5:
-            num_cols = [c for c in cols if df[c].dtype in ("float64", "int64", "float32")]
+            _skip = {"振幅", "涨跌幅", "涨跌额", "换手率", "股票代码",
+                      "最新价", "均价", "代码", "名称", "昨收"}
+            num_cols = [
+                c for c in cols
+                if df[c].dtype in ("float64", "int64", "float32")
+                and c not in _skip
+            ]
             if len(num_cols) >= 5:
                 result.setdefault("open", num_cols[0])
                 result.setdefault("close", num_cols[1])
