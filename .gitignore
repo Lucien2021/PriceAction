@@ -1,0 +1,14 @@
+# Python 字节码
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 开发工具相关
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# 如果你用的是 Cursor/VS Code
+.vscode/
