@@ -306,7 +306,8 @@ function getChartImage(){
   if(!cvs)return '';
   renderSnapshotOverlays();
   var merged=document.createElement('canvas');
-  merged.width=el.offsetWidth;merged.height=el.offsetHeight;
+  var w=cvs.width,h=cvs.height;
+  merged.width=w;merged.height=h;
   var mctx=merged.getContext('2d');
   var canvases=el.querySelectorAll('canvas');
   for(var i=0;i<canvases.length;i++){mctx.drawImage(canvases[i],0,0)}

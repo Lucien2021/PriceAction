@@ -923,10 +923,11 @@ class MainWindow(QMainWindow):
         tf = self._session.timeframe or Timeframe.DAILY
         entry_markers = self._chart.build_trade_markers([trade], tf)
 
-        buf_before = 10
-        buf_after = 5
+        total_bars = len(self._session.displayed_candles)
+        buf_before = 50
+        buf_after = 15
         start_idx = max(0, trade.entry_bar_index - buf_before)
-        end_idx = trade.exit_bar_index + buf_after
+        end_idx = min(total_bars - 1, trade.exit_bar_index + buf_after)
         self._chart.prepare_snapshot(start_idx, end_idx, entry_markers)
 
         if tf.minutes >= Timeframe.DAILY.minutes:
