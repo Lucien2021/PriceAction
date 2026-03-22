@@ -98,17 +98,31 @@ class TradeMode:
     # Position sizing
     # ------------------------------------------------------------------
 
+    def max_affordable_quantity(self, entry_price: float) -> int:
+        """Max contracts/shares affordable with current capital (lot-rounded, A股 100 手)."""
+        lot_size = 100
+        if entry_price <= 0 or self._capital <= 0:
+            return 0
+        mr = self._rules.margin_rule().initial_margin_rate
+        mult = self._rules.contract_multiplier()
+        denom = entry_price * mult * mr
+        if denom <= 0:
+            return 0
+        q = int(self._capital / denom)
+        return max(0, (q // lot_size) * lot_size)
+
     def calculate_risk_position(
         self, risk_pct: float, entry_price: float, stop_loss: float,
     ) -> int:
+        lot_size = 100
+        cap = self.max_affordable_quantity(entry_price)
         if stop_loss == 0 or entry_price == 0 or stop_loss == entry_price:
-            return 100
+            return cap
         risk_amount = self._capital * (risk_pct / 100.0)
         per_share_risk = abs(entry_price - stop_loss)
         qty = int(risk_amount / per_share_risk)
-        lot_size = 100
-        qty = max(lot_size, (qty // lot_size) * lot_size)
-        return qty
+        qty = (qty // lot_size) * lot_size
+        return min(qty, cap)
 
     def _apply_slippage(self, price: float, is_buy: bool) -> float:
         slip = price * self._slippage_pct

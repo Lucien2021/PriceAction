@@ -51,6 +51,18 @@ def test_market_rules():
     print("[PASS] FutureRules")
 
 
+def test_risk_position_capped_by_capital():
+    session = ReplaySession()
+    tm = TradeMode(session, initial_capital=100_000.0, slippage_pct=0)
+    assert tm.max_affordable_quantity(10.0) == 10_000
+    # 止损极近时按风险公式会算出超大股数，必须不超过满仓
+    q_tight = tm.calculate_risk_position(1.0, 10.0, 9.99)
+    assert q_tight == 10_000
+    q_normal = tm.calculate_risk_position(1.0, 10.0, 9.0)
+    assert q_normal == 1_000
+    print("[PASS] risk position capped by capital")
+
+
 def test_trade_mode():
     candles = make_candles(200)
     symbol = Symbol("000001", "Test", MarketType.A_SHARE)
@@ -231,6 +243,7 @@ def test_stop_loss_gap_fill_at_open():
 
 if __name__ == "__main__":
     test_market_rules()
+    test_risk_position_capped_by_capital()
     test_trade_mode()
     test_predict_mode()
     test_stats_service()
