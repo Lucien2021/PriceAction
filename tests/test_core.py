@@ -179,17 +179,54 @@ def test_stop_loss_trigger():
     session = ReplaySession()
     session.setup(symbol, Timeframe.DAILY, TrainingMode.TRADE, candles[:60], candles[60:])
     session.start()
-    tm = TradeMode(session)
+    tm = TradeMode(session, slippage_pct=0.0)
 
     session.advance(5)
     cur = session.current_candle.close
-    tm.open_long(1000, stop_loss=cur - 1.0)
+    stop_px = cur - 1.0
+    tm.open_long(1000, stop_loss=stop_px)
 
     closed = tm.advance_and_check(10)
     assert closed is not None
     assert closed.exit_reason == "stop_loss"
+    # Intraday pierce: open above stop, low hits stop -> fill at stop (min(stop, open))
+    c70 = candles[70]
+    assert closed.exit_price == round(min(stop_px, c70.open), 2)
     print(f"  Stop loss triggered: exit={closed.exit_price:.2f}, pnl={closed.pnl:+.2f}")
     print("[PASS] StopLoss trigger")
+
+
+def test_stop_loss_gap_fill_at_open():
+    """Open gaps below stop: fill at open, not at stop price."""
+    candles = []
+    for i in range(100):
+        if i == 65:
+            o, h, l, c = 12.0, 12.2, 11.5, 11.8
+        else:
+            o, h, l, c = 15.0, 15.3, 14.9, 15.0
+        candles.append(Candle(
+            timestamp=datetime(2025, 1, 1) + timedelta(days=i),
+            open=round(o, 2), high=round(h, 2),
+            low=round(l, 2), close=round(c, 2), volume=10000,
+        ))
+
+    symbol = Symbol("600000", "Test", MarketType.A_SHARE)
+    session = ReplaySession()
+    session.setup(symbol, Timeframe.DAILY, TrainingMode.TRADE, candles[:60], candles[60:])
+    session.start()
+    tm = TradeMode(session, slippage_pct=0.0)
+
+    session.advance(5)
+    stop_px = 13.0
+    tm.open_long(1000, stop_loss=stop_px)
+
+    closed = tm.advance_and_check(10)
+    assert closed is not None
+    assert closed.exit_reason == "stop_loss"
+    assert closed.exit_price == 12.0
+    assert closed.exit_price < stop_px
+    print(f"  Gap stop loss: exit={closed.exit_price:.2f} (open), stop was {stop_px:.2f}")
+    print("[PASS] StopLoss gap fill at open")
 
 
 if __name__ == "__main__":
@@ -198,4 +235,5 @@ if __name__ == "__main__":
     test_predict_mode()
     test_stats_service()
     test_stop_loss_trigger()
+    test_stop_loss_gap_fill_at_open()
     print("\n=== ALL TESTS PASSED ===")

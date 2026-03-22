@@ -161,6 +161,14 @@ class Position:
             return candle.low <= self.stop_loss
         return candle.high >= self.stop_loss
 
+    def stop_loss_fill_price(self, candle: Candle) -> float:
+        """Realistic exit when stop is hit: gap uses open; else stop level (long: min, short: max)."""
+        if self.stop_loss is None:
+            raise ValueError("stop_loss is required for stop_loss_fill_price")
+        if self.is_long:
+            return round(min(self.stop_loss, candle.open), 2)
+        return round(max(self.stop_loss, candle.open), 2)
+
     def should_take_profit(self, candle: Candle) -> bool:
         if self.take_profit is None:
             return False

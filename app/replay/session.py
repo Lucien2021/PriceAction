@@ -163,6 +163,7 @@ class ReplaySession:
         reason: str = "manual",
         trigger_candle: Optional[Candle] = None,
         trigger_bar_index: Optional[int] = None,
+        exit_price_base: Optional[float] = None,
     ) -> Optional[ClosedTrade]:
         if self.position is None:
             return None
@@ -170,10 +171,11 @@ class ReplaySession:
         if candle is None:
             return None
         bar_index = trigger_bar_index if trigger_bar_index is not None else self.absolute_bar_index
+        exit_px = candle.close if exit_price_base is None else exit_price_base
         trade = ClosedTrade(
             direction=self.position.direction,
             entry_price=self.position.entry_price,
-            exit_price=candle.close,
+            exit_price=exit_px,
             quantity=self.position.quantity,
             entry_time=self.position.entry_time or candle.timestamp,
             exit_time=candle.timestamp,
@@ -197,17 +199,16 @@ class ReplaySession:
         if candle is None:
             return None
         if self.position.should_stop_loss(candle):
-            sl_price = self.position.stop_loss
-            result = self.close_position(reason="stop_loss")
-            if result and sl_price is not None:
-                result.exit_price = sl_price
-            return result
+            fill = self.position.stop_loss_fill_price(candle)
+            return self.close_position(reason="stop_loss", exit_price_base=fill)
         if self.position.should_take_profit(candle):
             tp_price = self.position.take_profit
-            result = self.close_position(reason="take_profit")
-            if result and tp_price is not None:
-                result.exit_price = tp_price
-            return result
+            if tp_price is None:
+                return None
+            return self.close_position(
+                reason="take_profit",
+                exit_price_base=tp_price,
+            )
         return None
 
     # ------------------------------------------------------------------

@@ -172,6 +172,7 @@ class TradeMode:
         reason: str = "manual",
         trigger_candle: Optional[Candle] = None,
         trigger_bar_index: Optional[int] = None,
+        exit_price_base: Optional[float] = None,
     ) -> Optional[ClosedTrade]:
         equity_before = self._capital
         entry_comm = self._entry_commission
@@ -179,6 +180,7 @@ class TradeMode:
             reason,
             trigger_candle=trigger_candle,
             trigger_bar_index=trigger_bar_index,
+            exit_price_base=exit_price_base,
         )
         if trade:
             if self._slippage_pct > 0:
@@ -314,31 +316,22 @@ class TradeMode:
             if pos is None:
                 continue
             if pos.should_stop_loss(candle):
-                sl_price = pos.stop_loss
+                fill = pos.stop_loss_fill_price(candle)
                 trigger_bar = self._session.absolute_bar_index - n + i
-                trade = self.close(
+                return self.close(
                     "stop_loss",
                     trigger_candle=candle,
                     trigger_bar_index=trigger_bar,
+                    exit_price_base=fill,
                 )
-                if trade and sl_price is not None:
-                    old_pnl = trade.pnl
-                    trade.exit_price = sl_price
-                    self._capital += trade.pnl - old_pnl
-                return trade
             if pos.should_take_profit(candle):
-                tp_price = pos.take_profit
                 trigger_bar = self._session.absolute_bar_index - n + i
-                trade = self.close(
+                return self.close(
                     "take_profit",
                     trigger_candle=candle,
                     trigger_bar_index=trigger_bar,
+                    exit_price_base=pos.take_profit,
                 )
-                if trade and tp_price is not None:
-                    old_pnl = trade.pnl
-                    trade.exit_price = tp_price
-                    self._capital += trade.pnl - old_pnl
-                return trade
         return None
 
     # ------------------------------------------------------------------
