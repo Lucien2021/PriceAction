@@ -63,6 +63,39 @@ def test_risk_position_capped_by_capital():
     print("[PASS] risk position capped by capital")
 
 
+def test_t1_long_blocks_same_day_close():
+    candles = make_candles(100)
+    symbol = Symbol("000001", "Test", MarketType.A_SHARE)
+    session = ReplaySession()
+    session.setup(symbol, Timeframe.DAILY, TrainingMode.TRADE, candles[:60], candles[60:])
+    session.start()
+    tm = TradeMode(session, slippage_pct=0.0, rules=AShareRules())
+    session.advance(5)
+    assert tm.open_long(1000, stop_loss=candles[64].close - 2.0)
+    assert tm.close("manual") is None
+    assert not tm.can_close_position_now()
+    session.advance(1)
+    assert tm.can_close_position_now()
+    closed = tm.close("manual")
+    assert closed is not None
+    print("[PASS] T+1 blocks same-day close (A-share)")
+
+
+def test_t0_future_allows_same_day_close():
+    candles = make_candles(100)
+    symbol = Symbol("cu8888", "Test", MarketType.FUTURE)
+    session = ReplaySession()
+    session.setup(symbol, Timeframe.DAILY, TrainingMode.TRADE, candles[:60], candles[60:])
+    session.start()
+    tm = TradeMode(session, slippage_pct=0.0, rules=FutureRules())
+    session.advance(5)
+    assert tm.open_long(1000, stop_loss=candles[64].close - 2.0)
+    assert tm.can_close_position_now()
+    closed = tm.close("manual")
+    assert closed is not None
+    print("[PASS] T+0 same-day close (futures)")
+
+
 def test_trade_mode():
     candles = make_candles(200)
     symbol = Symbol("000001", "Test", MarketType.A_SHARE)
@@ -244,6 +277,8 @@ def test_stop_loss_gap_fill_at_open():
 if __name__ == "__main__":
     test_market_rules()
     test_risk_position_capped_by_capital()
+    test_t1_long_blocks_same_day_close()
+    test_t0_future_allows_same_day_close()
     test_trade_mode()
     test_predict_mode()
     test_stats_service()

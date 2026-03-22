@@ -154,6 +154,14 @@ class Position:
         if diff < self.max_adverse:
             self.max_adverse = diff
 
+    def can_sell_asof(self, candle: Candle, allows_t0: bool) -> bool:
+        """A股 T+1：多头当日买入须至下一交易日方可卖出；T+0 或空头不适用此限制。"""
+        if allows_t0 or not self.is_long:
+            return True
+        if self.entry_time is None:
+            return True
+        return candle.timestamp.date() > self.entry_time.date()
+
     def should_stop_loss(self, candle: Candle) -> bool:
         if self.stop_loss is None:
             return False

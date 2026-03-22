@@ -8,7 +8,7 @@ import uuid
 
 from app.domain.candle import (
     Candle, ClosedTrade, Position, Prediction,
-    Symbol, Timeframe, TradeDirection,
+    Symbol, Timeframe, TradeDirection, MarketType,
 )
 
 
@@ -198,10 +198,15 @@ class ReplaySession:
         candle = self.current_candle
         if candle is None:
             return None
+        allows_t0 = bool(self.symbol and self.symbol.market_type == MarketType.FUTURE)
         if self.position.should_stop_loss(candle):
+            if not self.position.can_sell_asof(candle, allows_t0):
+                return None
             fill = self.position.stop_loss_fill_price(candle)
             return self.close_position(reason="stop_loss", exit_price_base=fill)
         if self.position.should_take_profit(candle):
+            if not self.position.can_sell_asof(candle, allows_t0):
+                return None
             tp_price = self.position.take_profit
             if tp_price is None:
                 return None

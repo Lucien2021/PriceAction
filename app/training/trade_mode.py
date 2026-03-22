@@ -133,6 +133,19 @@ class TradeMode:
             return 0.0
         return self._rules.calculate_commission(price, quantity, is_sell)
 
+    def _can_sell_now(self, pos: Position, candle: Candle) -> bool:
+        return pos.can_sell_asof(candle, self._rules.allows_t0())
+
+    def can_close_position_now(self) -> bool:
+        """当前 K 线是否允许卖出（A 股多头受 T+1 限制）。"""
+        pos = self._session.position
+        if pos is None:
+            return False
+        c = self._session.current_candle
+        if c is None:
+            return False
+        return self._can_sell_now(pos, c)
+
     # ------------------------------------------------------------------
     # Open
     # ------------------------------------------------------------------
@@ -188,6 +201,14 @@ class TradeMode:
         trigger_bar_index: Optional[int] = None,
         exit_price_base: Optional[float] = None,
     ) -> Optional[ClosedTrade]:
+        pos = self._session.position
+        if pos is None:
+            return None
+        candle = trigger_candle if trigger_candle is not None else self._session.current_candle
+        if candle is None:
+            return None
+        if not self._can_sell_now(pos, candle):
+            return None
         equity_before = self._capital
         entry_comm = self._entry_commission
         trade = self._session.close_position(
@@ -245,6 +266,8 @@ class TradeMode:
         equity_before = self._capital
         candle = self._session.current_candle
         if candle is None:
+            return None
+        if not self._can_sell_now(pos, candle):
             return None
 
         exit_price = candle.close
@@ -330,6 +353,8 @@ class TradeMode:
             if pos is None:
                 continue
             if pos.should_stop_loss(candle):
+                if not self._can_sell_now(pos, candle):
+                    continue
                 fill = pos.stop_loss_fill_price(candle)
                 trigger_bar = self._session.absolute_bar_index - n + i
                 return self.close(
@@ -339,6 +364,8 @@ class TradeMode:
                     exit_price_base=fill,
                 )
             if pos.should_take_profit(candle):
+                if not self._can_sell_now(pos, candle):
+                    continue
                 trigger_bar = self._session.absolute_bar_index - n + i
                 return self.close(
                     "take_profit",

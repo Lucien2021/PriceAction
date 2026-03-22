@@ -874,6 +874,12 @@ class MainWindow(QMainWindow):
     def _on_close_position(self):
         if not self._trade_mode:
             return
+        if not self._trade_mode.can_close_position_now():
+            QMessageBox.information(
+                self, "T+1",
+                "A股当日买入的股票当日不可卖出，请推进 K 线至下一交易日再平仓。",
+            )
+            return
         closed = self._trade_mode.close("manual")
         if closed:
             self._on_trade_closed(closed)
@@ -884,6 +890,12 @@ class MainWindow(QMainWindow):
         pos = self._session.position
         if pos is None:
             QMessageBox.information(self, "提示", "当前无持仓")
+            return
+        if not self._trade_mode.can_close_position_now():
+            QMessageBox.information(
+                self, "T+1",
+                "A股当日买入的股票当日不可卖出，请推进 K 线至下一交易日再平仓。",
+            )
             return
         closed = self._trade_mode.close_partial(ratio, "partial")
         if closed:
@@ -1161,10 +1173,17 @@ class MainWindow(QMainWindow):
                 return
 
         if self._session.position and self._trade_mode:
-            closed = self._trade_mode.close("session_end")
-            if closed:
-                closed.planned_risk_pct = self._spn_risk_pct.value()
-                self._session.closed_trades.append(closed) if closed not in self._session.closed_trades else None
+            if self._trade_mode.can_close_position_now():
+                closed = self._trade_mode.close("session_end")
+                if closed:
+                    closed.planned_risk_pct = self._spn_risk_pct.value()
+                    if closed not in self._session.closed_trades:
+                        self._session.closed_trades.append(closed)
+            else:
+                QMessageBox.information(
+                    self, "T+1",
+                    "当日买入尚未可卖出，无法以市价平仓。会话将结束并保留持仓（与实盘一致）。",
+                )
         self._session.finish()
         if self._predict_mode:
             self._session.evaluate_predictions()
@@ -1319,6 +1338,10 @@ class MainWindow(QMainWindow):
             self._lbl_trade_info.setText(f"无持仓\n{cap}")
             self._lbl_position.setText(cap)
             self._chart.remove_all_trade_lines()
+            self._btn_close.setEnabled(False)
+            self._btn_close_half.setEnabled(False)
+            self._btn_close_third.setEnabled(False)
+            self._btn_close_quarter.setEnabled(False)
             return
         candle = self._session.current_candle
         current_price = candle.close if candle else pos.entry_price
@@ -1330,13 +1353,21 @@ class MainWindow(QMainWindow):
         rr_text = f"  盈亏比: {rr}" if rr is not None else ""
         direction = "多" if pos.is_long else "空"
         cap_text = f"资金: {self._trade_mode.capital:,.0f}" if self._trade_mode else ""
+        can_sell = bool(self._trade_mode and self._trade_mode.can_close_position_now())
+        t1_note = ""
+        if pos.is_long and self._rules and not self._rules.allows_t0() and not can_sell:
+            t1_note = "  [T+1 当日不可卖]"
         self._lbl_trade_info.setText(
             f"方向: {direction}  入场: {pos.entry_price:.2f}  数量: {pos.quantity}\n"
             f"浮盈: {pnl:+.2f} ({pct:+.2f}%){r_text}{rr_text}\n"
-            f"SL: {pos.stop_loss or '无'}  TP: {pos.take_profit or '无'}  风险: {self._spn_risk_pct.value():.2f}%\n"
+            f"SL: {pos.stop_loss or '无'}  TP: {pos.take_profit or '无'}  风险: {self._spn_risk_pct.value():.2f}%{t1_note}\n"
             f"{cap_text}"
         )
         self._lbl_position.setText(f"持仓 {direction} {pnl:+.2f}")
+        self._btn_close.setEnabled(can_sell)
+        self._btn_close_half.setEnabled(can_sell)
+        self._btn_close_third.setEnabled(can_sell)
+        self._btn_close_quarter.setEnabled(can_sell)
 
     def _update_live_stats(self):
         if self._trade_mode:
