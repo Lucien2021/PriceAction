@@ -15,6 +15,11 @@ from app.training.trade_mode import TradeMode, TradeStats
 from app.training.predict_mode import PredictMode
 from app.storage.models import get_connection
 from app.storage.stats_service import StatsService
+from app.storage.challenge_service import ChallengeService
+from app.training.challenge_trade_mode import ChallengeTradeMode
+from app.data.cache.repository import CacheRepository
+from app.data.providers.akshare_provider import AKShareProvider
+from app.replay.engine import ReplayEngine
 
 
 def make_candles(n=100, base_price=10.0):
@@ -274,6 +279,77 @@ def test_stop_loss_gap_fill_at_open():
     print("[PASS] StopLoss gap fill at open")
 
 
+def test_challenge_slice_contiguous_tail():
+    cache = CacheRepository(":memory:")
+    eng = ReplayEngine(cache, AKShareProvider())
+    candles = make_candles(120)
+    sym = Symbol("000001", "T", MarketType.A_SHARE)
+    cache.save_candles(sym, Timeframe.DAILY, candles)
+    for _ in range(5):
+        vis, fut = eng.challenge_slice(sym, Timeframe.DAILY, 60)
+        assert len(vis) == 60
+        assert len(fut) >= 2
+        flat = vis + fut
+        ts_flat = [c.timestamp for c in flat]
+        ok = False
+        for s in range(len(candles) - len(flat) + 1):
+            if [c.timestamp for c in candles[s : s + len(flat)]] == ts_flat:
+                ok = True
+                break
+        assert ok
+    pool = eng.symbols_with_timeframe(Timeframe.DAILY, min_bars=61)
+    assert "000001" in pool
+
+
+def test_challenge_trade_mode_outcome():
+    candles = make_candles(80)
+    sym = Symbol("000001", "T", MarketType.A_SHARE)
+    session = ReplaySession()
+    session.setup(sym, Timeframe.DAILY, TrainingMode.CHALLENGE, candles[:60], candles[20:70])
+    session.start()
+    ctm = ChallengeTradeMode(session, target_amount=90_000, initial_capital=50_000, slippage_pct=0.0, use_commission=False)
+    ctm._capital = 95_000
+    ctm.check_outcome_after_advance()
+    assert ctm.challenge_outcome == "win"
+
+    session2 = ReplaySession()
+    session2.setup(sym, Timeframe.DAILY, TrainingMode.CHALLENGE, candles[:60], candles[20:70])
+    session2.start()
+    ctm2 = ChallengeTradeMode(session2, target_amount=200_000, initial_capital=50_000, slippage_pct=0.0, use_commission=False)
+    ctm2._capital = 0.0
+    ctm2.check_outcome_after_advance()
+    assert ctm2.challenge_outcome == "lose"
+
+
+def test_challenge_service_save():
+    conn = get_connection(":memory:")
+    svc = ChallengeService(conn)
+    from datetime import datetime as dt
+    rid = svc.save_run(
+        target_amount=500_000,
+        initial_capital=200_000,
+        final_equity=180_000,
+        outcome="lose",
+        bars_elapsed=42,
+        calendar_seconds=3600,
+        avg_hold_bars=3.5,
+        trade_count=2,
+        win_rate=0.5,
+        profit_factor=0.8,
+        total_commission=12.0,
+        max_drawdown_pct=5.0,
+        symbols_used=["000001", "600000"],
+        started_at=dt(2026, 1, 1, 10, 0, 0),
+        finished_at=dt(2026, 1, 1, 11, 0, 0),
+        last_symbol="600000",
+    )
+    assert rid >= 1
+    grouped = svc.list_runs_grouped_by_target()
+    assert 500_000.0 in grouped
+    assert len(grouped[500_000.0]) == 1
+    svc.close()
+
+
 if __name__ == "__main__":
     test_market_rules()
     test_risk_position_capped_by_capital()
@@ -284,4 +360,7 @@ if __name__ == "__main__":
     test_stats_service()
     test_stop_loss_trigger()
     test_stop_loss_gap_fill_at_open()
+    test_challenge_slice_contiguous_tail()
+    test_challenge_trade_mode_outcome()
+    test_challenge_service_save()
     print("\n=== ALL TESTS PASSED ===")

@@ -118,6 +118,49 @@ CREATE INDEX IF NOT EXISTS idx_notes_session ON session_notes(session_id);
 CREATE INDEX IF NOT EXISTS idx_pa_ann_session ON pa_annotations(session_id);
 CREATE INDEX IF NOT EXISTS idx_mistake_session ON mistake_book(session_id);
 CREATE INDEX IF NOT EXISTS idx_equity_session ON equity_snapshots(session_id);
+
+CREATE TABLE IF NOT EXISTS challenge_runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_amount       REAL NOT NULL,
+    initial_capital     REAL NOT NULL DEFAULT 200000,
+    final_equity        REAL NOT NULL DEFAULT 0,
+    outcome             TEXT NOT NULL,
+    bars_elapsed        INTEGER NOT NULL DEFAULT 0,
+    calendar_seconds    REAL DEFAULT 0,
+    avg_hold_bars       REAL DEFAULT 0,
+    trade_count         INTEGER NOT NULL DEFAULT 0,
+    win_rate            REAL DEFAULT 0,
+    profit_factor       REAL DEFAULT 0,
+    total_commission    REAL DEFAULT 0,
+    max_drawdown_pct    REAL DEFAULT 0,
+    symbols_used        TEXT NOT NULL DEFAULT '[]',
+    started_at          TEXT,
+    finished_at         TEXT,
+    last_symbol         TEXT DEFAULT '',
+    notes               TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS challenge_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES challenge_runs(id),
+    direction       TEXT NOT NULL,
+    entry_price     REAL NOT NULL,
+    exit_price      REAL NOT NULL,
+    quantity        INTEGER NOT NULL,
+    entry_time      TEXT,
+    exit_time       TEXT,
+    entry_bar_index INTEGER,
+    exit_bar_index  INTEGER,
+    exit_reason     TEXT,
+    pnl             REAL,
+    pnl_pct         REAL,
+    hold_bars       INTEGER,
+    commission      REAL DEFAULT 0,
+    symbol          TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_challenge_trades_run ON challenge_trades(run_id);
+CREATE INDEX IF NOT EXISTS idx_challenge_runs_target ON challenge_runs(target_amount);
 """
 
 _MIGRATIONS = [
@@ -141,11 +184,30 @@ _MIGRATIONS = [
 ]
 
 
+def _drop_stale_challenge_tables(conn: sqlite3.Connection) -> None:
+    """若 challenge_trades 已存在但缺少 run_id（旧/半建表），先删掉再让 _SCHEMA 重建。"""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='challenge_trades'"
+        ).fetchone()
+        if not row:
+            return
+        cols = conn.execute("PRAGMA table_info(challenge_trades)").fetchall()
+        names = {c[1] for c in cols}
+        if "run_id" not in names:
+            conn.execute("DROP TABLE IF EXISTS challenge_trades")
+            conn.execute("DROP TABLE IF EXISTS challenge_runs")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path else _DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    _drop_stale_challenge_tables(conn)
     conn.executescript(_SCHEMA)
     _apply_migrations(conn)
     return conn

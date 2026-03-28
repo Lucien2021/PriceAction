@@ -266,6 +266,19 @@ class AKShareProvider:
             results.append(Symbol(code=row["code"], name=row["name"], market_type=MarketType.A_SHARE))
         return results
 
+    def list_a_share_codes(self) -> List[str]:
+        try:
+            df = ak.stock_info_a_code_name()
+        except Exception:
+            return []
+        out: List[str] = []
+        for raw in df["code"].astype(str):
+            c = raw.strip()
+            if c.isdigit():
+                c = c.zfill(6)
+            out.append(c)
+        return out
+
     # ------------------------------------------------------------------
 
     def _fetch_daily(

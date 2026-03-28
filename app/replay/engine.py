@@ -66,6 +66,27 @@ class ReplayEngine:
     def load_all(self, symbol: Symbol, timeframe: Timeframe) -> List[Candle]:
         return self._trim_negative_qfq(self._cache.load_candles(symbol, timeframe))
 
+    def symbols_with_timeframe(self, timeframe: Timeframe, min_bars: int = 61) -> List[str]:
+        return self._cache.list_symbols_with_timeframe(timeframe, min_bars)
+
+    def challenge_slice(
+        self,
+        symbol: Symbol,
+        timeframe: Timeframe,
+        visible_bars: int,
+    ) -> Tuple[List[Candle], List[Candle]]:
+        """随机起点；future 为剩余全部 K 线（无 future 根数上限）。至少保留 2 根未来 K。"""
+        all_candles = self.load_all(symbol, timeframe)
+        if len(all_candles) < visible_bars + 2:
+            raise ValueError(
+                f"挑战切片数据不足: 需要至少 {visible_bars + 2} 根，当前 {len(all_candles)}"
+            )
+        max_start = len(all_candles) - visible_bars - 2
+        start = random.randint(0, max_start)
+        visible = all_candles[start : start + visible_bars]
+        future = all_candles[start + visible_bars :]
+        return visible, future
+
     @staticmethod
     def _trim_negative_qfq(candles: List[Candle]) -> List[Candle]:
         """Drop leading candles whose qfq-adjusted prices went negative.

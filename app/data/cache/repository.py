@@ -121,6 +121,13 @@ class CacheRepository:
         rows = self._conn.execute("SELECT DISTINCT symbol FROM candle_cache").fetchall()
         return [r[0] for r in rows]
 
+    def list_symbols_with_timeframe(self, timeframe: Timeframe, min_bars: int = 61) -> List[str]:
+        rows = self._conn.execute(
+            "SELECT symbol FROM candle_cache WHERE tf=? GROUP BY symbol HAVING COUNT(*) >= ?",
+            (timeframe.label, min_bars),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def get_cache_summary(self) -> List[dict]:
         rows = self._conn.execute(
             "SELECT symbol, tf, COUNT(*) as cnt, MIN(ts), MAX(ts) "

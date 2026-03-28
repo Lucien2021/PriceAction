@@ -22,6 +22,7 @@ class SessionState(Enum):
 class TrainingMode(Enum):
     PREDICT = "predict"
     TRADE = "trade"
+    CHALLENGE = "challenge"
 
 
 @dataclass

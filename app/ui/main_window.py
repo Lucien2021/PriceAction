@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import random
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -41,15 +43,25 @@ from PySide6.QtWidgets import (
 
 from app.data.cache.repository import CacheRepository
 from app.data.providers.akshare_provider import AKShareProvider
-from app.domain.candle import MarketType, PredictionDirection, Symbol, Timeframe, TradeDirection
+from app.domain.candle import (
+    ClosedTrade,
+    MarketType,
+    PredictionDirection,
+    Symbol,
+    Timeframe,
+    TradeDirection,
+)
 from app.domain.market_rules import AShareRules
 from app.replay.engine import ReplayEngine
 from app.replay.session import ReplaySession, SessionState, TrainingMode
+from app.storage.challenge_service import ChallengeService
 from app.storage.models import get_connection
 from app.storage.stats_service import StatsService
+from app.training.challenge_trade_mode import ChallengeTradeMode
 from app.training.predict_mode import PredictMode
 from app.training.trade_mode import TradeMode
 from app.ui.chart_bridge import ChartWidget
+from app.ui.challenge_review_panel import ChallengeReviewPanel
 from app.ui.review_panel import ReviewPanel
 
 _SNAPSHOT_DIR = Path.home() / ".priceaction" / "snapshots"
@@ -157,6 +169,35 @@ class SessionPlanDialog(QDialog):
         }
 
 
+class ChallengeStartDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("挑战模式")
+        self.setMinimumWidth(380)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("达成以下目标金额即挑战成功（须大于初始资金）:"))
+        self._spn_target = QDoubleSpinBox()
+        self._spn_target.setRange(210_000, 99_999_999)
+        self._spn_target.setDecimals(0)
+        self._spn_target.setSingleStep(10_000)
+        self._spn_target.setValue(500_000)
+        layout.addWidget(self._spn_target)
+        layout.addWidget(QLabel("初始资金（默认 20 万，独立于常规训练资金池）:"))
+        self._spn_initial = QDoubleSpinBox()
+        self._spn_initial.setRange(10_000, 99_999_999)
+        self._spn_initial.setDecimals(0)
+        self._spn_initial.setSingleStep(10_000)
+        self._spn_initial.setValue(200_000)
+        layout.addWidget(self._spn_initial)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self) -> Tuple[float, float]:
+        return self._spn_target.value(), self._spn_initial.value()
+
+
 class TradeReviewDialog(QDialog):
     def __init__(self, trade, snapshot_path: str = "", parent=None):
         super().__init__(parent)
@@ -246,6 +287,7 @@ class MainWindow(QMainWindow):
         self._rules = AShareRules()
         self._db_conn = get_connection()
         self._stats_service = StatsService(self._db_conn)
+        self._challenge_service = ChallengeService()
 
         self._session = ReplaySession()
         self._predict_mode: Optional[PredictMode] = None
@@ -254,6 +296,13 @@ class MainWindow(QMainWindow):
         self._chart_loaded = False
         self._planned_risk_pct = 1.0
         self._pending_review_trades: List = []
+        self._challenge_bars_elapsed = 0
+        self._challenge_started_at: Optional[datetime] = None
+        self._challenge_excluded_symbols: set = set()
+        self._challenge_accumulated: List[Tuple[str, ClosedTrade]] = []
+        self._challenge_symbols_seen: List[str] = []
+        self._challenge_target = 0.0
+        self._challenge_initial = 200_000.0
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_auto_advance)
@@ -264,6 +313,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._refresh_data_table()
         self._review_panel.refresh()
+        self._challenge_review_panel.refresh()
 
     # ==================================================================
     # UI
@@ -331,6 +381,13 @@ class MainWindow(QMainWindow):
         data_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_tabs.addTab(data_scroll, "数据")
 
+        self._challenge_review_panel = ChallengeReviewPanel(self._challenge_service)
+        cr_scroll = QScrollArea()
+        cr_scroll.setWidget(self._challenge_review_panel)
+        cr_scroll.setWidgetResizable(True)
+        cr_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_tabs.addTab(cr_scroll, "挑战复盘")
+
         splitter.addWidget(right_tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -391,13 +448,24 @@ class MainWindow(QMainWindow):
         mg = QHBoxLayout(mode_group)
         self._rb_trade = QRadioButton("模拟交易")
         self._rb_predict = QRadioButton("PA / 方向训练")
+        self._rb_challenge = QRadioButton("挑战模式")
         self._rb_trade.setChecked(True)
         self._mode_group = QButtonGroup()
         self._mode_group.addButton(self._rb_trade, 0)
         self._mode_group.addButton(self._rb_predict, 1)
+        self._mode_group.addButton(self._rb_challenge, 2)
         mg.addWidget(self._rb_trade)
         mg.addWidget(self._rb_predict)
+        mg.addWidget(self._rb_challenge)
         layout.addWidget(mode_group)
+
+        ch_row = QHBoxLayout()
+        self._btn_challenge_switch = QPushButton("换股票")
+        self._btn_challenge_switch.setVisible(False)
+        self._btn_challenge_switch.setMinimumHeight(28)
+        ch_row.addWidget(self._btn_challenge_switch)
+        ch_row.addStretch()
+        layout.addLayout(ch_row)
 
         plan_group = QGroupBox("本轮计划")
         pg = QVBoxLayout(plan_group)
@@ -594,6 +662,19 @@ class MainWindow(QMainWindow):
         self._data_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self._data_table)
 
+        rand_row = QHBoxLayout()
+        rand_row.addWidget(QLabel("随机只数:"))
+        self._spn_random_n = QSpinBox()
+        self._spn_random_n.setRange(1, 200)
+        self._spn_random_n.setValue(10)
+        rand_row.addWidget(self._spn_random_n)
+        self._chk_random_force = QCheckBox("强制重新下载")
+        rand_row.addWidget(self._chk_random_force)
+        self._btn_random_download = QPushButton("随机下载 A 股日线")
+        rand_row.addWidget(self._btn_random_download)
+        rand_row.addStretch()
+        layout.addLayout(rand_row)
+
         btn_row = QHBoxLayout()
         self._btn_refresh_data = QPushButton("刷新列表")
         self._btn_delete_sel = QPushButton("删除选中")
@@ -620,6 +701,8 @@ class MainWindow(QMainWindow):
         self._btn_refresh_data.clicked.connect(self._refresh_data_table)
         self._btn_delete_sel.clicked.connect(self._on_delete_selected_data)
         self._btn_delete_all.clicked.connect(self._on_delete_all_data)
+        self._btn_random_download.clicked.connect(self._on_random_batch_download)
+        self._btn_challenge_switch.clicked.connect(self._on_challenge_switch_stock)
 
         self._btn_next.clicked.connect(lambda: self._advance(1))
         self._btn_next5.clicked.connect(lambda: self._advance(5))
@@ -680,6 +763,10 @@ class MainWindow(QMainWindow):
             self._refresh_data_table()
 
     def _on_start_session(self):
+        if self._rb_challenge.isChecked():
+            self._start_challenge_session()
+            return
+
         code = self._inp_symbol.text().strip()
         if not code:
             return
@@ -754,15 +841,214 @@ class MainWindow(QMainWindow):
             f"可见{len(visible)} + 未来{len(future)}"
         )
 
+    def _pick_random_challenge_symbol(self) -> Optional[str]:
+        vis = self._spn_visible.value()
+        pool = self._engine.symbols_with_timeframe(Timeframe.DAILY, min_bars=vis + 2)
+        candidates = [c for c in pool if c not in self._challenge_excluded_symbols]
+        if not candidates:
+            return None
+        return random.choice(candidates)
+
+    def _start_challenge_session(self) -> None:
+        dlg = ChallengeStartDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        target, initial = dlg.get_values()
+        if target <= initial:
+            QMessageBox.warning(self, "无效", "目标金额须大于初始资金。")
+            return
+
+        self._challenge_target = target
+        self._challenge_initial = initial
+        self._challenge_bars_elapsed = 0
+        self._challenge_started_at = datetime.now()
+        self._challenge_excluded_symbols = set()
+        self._challenge_accumulated = []
+        self._challenge_symbols_seen = []
+
+        code = self._pick_random_challenge_symbol()
+        if not code:
+            QMessageBox.warning(
+                self, "无数据",
+                "缓存中没有足够的 A 股日线（需满足可见K线+2）。请先在「数据」中下载或使用「随机下载 A 股日线」。",
+            )
+            return
+
+        self._session = ReplaySession()
+        self._trade_mode = ChallengeTradeMode(
+            self._session,
+            target_amount=target,
+            initial_capital=initial,
+            rules=self._rules,
+        )
+        self._predict_mode = None
+        self._pending_review_trades.clear()
+        self._btn_write_review.setEnabled(False)
+        self._btn_sell.setEnabled(self._rules.allows_short())
+        self._btn_limit_sell.setEnabled(self._rules.allows_short())
+
+        self._reload_challenge_slice(code)
+        self._inp_symbol.setText(code)
+        self._btn_challenge_switch.setVisible(True)
+        self._session.setup_type = "挑战模式"
+        self._session.plan_notes = f"目标 {target:,.0f} / 初始 {initial:,.0f}"
+        self._update_plan_label()
+        self._lbl_status.setText(f"挑战开始: {code} 日线 | 目标 {target:,.0f} 元")
+
+    def _reload_challenge_slice(self, code: str) -> bool:
+        symbol = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
+        tf = Timeframe.DAILY
+        vis_n = self._spn_visible.value()
+        try:
+            visible, future = self._engine.challenge_slice(symbol, tf, vis_n)
+        except ValueError as exc:
+            QMessageBox.warning(self, "数据不足", str(exc))
+            return False
+        if code not in self._challenge_symbols_seen:
+            self._challenge_symbols_seen.append(code)
+        self._session.setup(symbol, tf, TrainingMode.CHALLENGE, visible, future)
+        self._session.start()
+        self._pending_limit = None
+        self._chart.set_timeframe(tf)
+        self._chart.set_candles(visible)
+        self._chart.set_ma_data(visible)
+        self._chart.clear_drawings()
+        self._chart.remove_all_trade_lines()
+        self._refresh_markers()
+        self._update_bar_label()
+        self._update_live_stats()
+        self._update_position_display()
+        return True
+
+    def _on_challenge_switch_stock(self) -> None:
+        if self._session.mode != TrainingMode.CHALLENGE or self._session.state != SessionState.RUNNING:
+            return
+        if self._session.position:
+            QMessageBox.information(self, "换股票", "当前仍有持仓，请先平仓后再切换股票。")
+            return
+        prev = self._session.symbol.code if self._session.symbol else None
+        if prev:
+            self._challenge_excluded_symbols.add(prev)
+        code = self._pick_random_challenge_symbol()
+        if not code:
+            QMessageBox.warning(self, "提示", "没有可用股票（均已排除或缓存不足）。请先下载更多日线数据。")
+            if prev:
+                self._challenge_excluded_symbols.discard(prev)
+            return
+        if not self._reload_challenge_slice(code):
+            if prev:
+                self._challenge_excluded_symbols.discard(prev)
+            return
+        self._inp_symbol.setText(code)
+        self._lbl_status.setText(f"已切换股票: {code}")
+
+    def _challenge_handle_slice_end(self) -> None:
+        if self._session.mode != TrainingMode.CHALLENGE:
+            return
+        if not isinstance(self._trade_mode, ChallengeTradeMode) or self._trade_mode.challenge_outcome:
+            return
+        if self._session.position:
+            QMessageBox.information(
+                self, "K 线已尽头",
+                "当前股票已无后续 K 线。请先平仓，再点击【换股票】继续挑战。",
+            )
+            self._lbl_status.setText("本股 K 线结束，请平仓后换股票")
+            return
+        self._challenge_auto_switch_after_exhaust()
+
+    def _challenge_auto_switch_after_exhaust(self) -> None:
+        prev = self._session.symbol.code if self._session.symbol else None
+        if prev:
+            self._challenge_excluded_symbols.add(prev)
+        code = self._pick_random_challenge_symbol()
+        if not code:
+            QMessageBox.warning(self, "挑战无法继续", "没有更多可用股票数据。挑战将按放弃保存。")
+            self._persist_challenge_run("abandon")
+            self._cleanup_challenge_ui()
+            return
+        if self._reload_challenge_slice(code):
+            self._inp_symbol.setText(code)
+            self._lbl_status.setText(f"本股数据已用尽，已自动切换: {code}")
+
+    def _persist_challenge_run(self, outcome: str) -> None:
+        if not isinstance(self._trade_mode, ChallengeTradeMode):
+            return
+        tm = self._trade_mode
+        trades_pairs: List[Tuple[str, ClosedTrade]] = list(self._challenge_accumulated)
+        trade_list = [t for _, t in trades_pairs]
+        stats = tm.compute_stats(trade_list) if trade_list else None
+        avg_hold = stats.avg_hold_bars if stats else 0.0
+        win_rate = stats.win_rate if stats else 0.0
+        tc = stats.total_trades if stats else 0
+        total_comm = stats.total_commission if stats else 0.0
+        max_dd = stats.max_drawdown_pct if stats else 0.0
+        pf = stats.profit_factor if stats else 0.0
+        if pf == float("inf"):
+            pf = 999999.0
+        started = self._challenge_started_at
+        finished = datetime.now()
+        cal_sec = (finished - started).total_seconds() if started else 0.0
+        last_sym = self._session.symbol.code if self._session.symbol else ""
+        self._challenge_service.save_run(
+            target_amount=self._challenge_target,
+            initial_capital=self._challenge_initial,
+            final_equity=tm.capital,
+            outcome=outcome,
+            bars_elapsed=self._challenge_bars_elapsed,
+            calendar_seconds=cal_sec,
+            avg_hold_bars=avg_hold,
+            trade_count=tc,
+            win_rate=win_rate,
+            profit_factor=pf,
+            total_commission=total_comm,
+            max_drawdown_pct=max_dd,
+            symbols_used=list(self._challenge_symbols_seen),
+            started_at=started,
+            finished_at=finished,
+            last_symbol=last_sym,
+            trades_with_symbols=trades_pairs,
+        )
+        self._challenge_review_panel.refresh()
+
+    def _cleanup_challenge_ui(self) -> None:
+        self._trade_mode = None
+        self._predict_mode = None
+        self._session = ReplaySession()
+        self._btn_challenge_switch.setVisible(False)
+        self._pending_review_trades.clear()
+        self._btn_write_review.setEnabled(False)
+        self._play_timer.stop()
+        self._btn_play.setVisible(True)
+        self._btn_pause.setVisible(False)
+        self._update_bar_label()
+        self._update_live_stats()
+        self._update_position_display()
+
+    def _end_challenge_run(self, outcome: str) -> None:
+        self._on_pause()
+        self._session.finish()
+        self._persist_challenge_run(outcome)
+        self._cleanup_challenge_ui()
+        if outcome == "win":
+            QMessageBox.information(self, "挑战成功", "已达到目标金额，挑战成功！记录已保存，可在「挑战复盘」查看。")
+        else:
+            QMessageBox.information(self, "挑战失败", "资金已归零，挑战失败。记录已保存。")
+
+    def _finish_challenge_abandon(self, _drawings: list) -> None:
+        self._persist_challenge_run("abandon")
+        self._cleanup_challenge_ui()
+        self._lbl_status.setText("挑战已结束（放弃）并已保存")
+        QMessageBox.information(self, "已保存", "挑战记录已保存。可在「挑战复盘」按目标金额查看。")
+
     def _advance(self, steps: int = 1):
         if self._session.state != SessionState.RUNNING:
             return
 
+        is_challenge = self._session.mode == TrainingMode.CHALLENGE
         old_count = len(self._session.displayed_candles)
+        closed = None
         if self._trade_mode:
             closed = self._trade_mode.advance_and_check(steps)
-            if closed:
-                self._on_trade_closed(closed)
         elif self._predict_mode:
             self._predict_mode.reveal_and_evaluate(steps)
         else:
@@ -775,14 +1061,36 @@ class MainWindow(QMainWindow):
         if new_candles:
             self._chart.add_ma_point(self._session.displayed_candles)
 
+        revealed = len(new_candles)
+        if is_challenge:
+            self._challenge_bars_elapsed += revealed
+
+        if closed:
+            self._on_trade_closed(closed)
+            if (
+                is_challenge
+                and isinstance(self._trade_mode, ChallengeTradeMode)
+                and self._trade_mode.challenge_outcome
+            ):
+                return
+
         self._refresh_markers()
         self._update_position_display()
         self._update_bar_label()
         self._update_live_stats()
 
+        if is_challenge and isinstance(self._trade_mode, ChallengeTradeMode):
+            self._trade_mode.check_outcome_after_advance()
+            if self._trade_mode.challenge_outcome:
+                self._end_challenge_run(self._trade_mode.challenge_outcome)
+                return
+
         if self._session.state == SessionState.FINISHED:
             self._on_pause()
-            self._lbl_status.setText("回放结束")
+            if is_challenge:
+                self._challenge_handle_slice_end()
+            else:
+                self._lbl_status.setText("回放结束")
 
     def _on_play(self):
         if self._session.state == SessionState.PAUSED:
@@ -812,8 +1120,8 @@ class MainWindow(QMainWindow):
     def _on_mode_toggle(self, btn_id, checked):
         if not checked:
             return
-        self._trade_box.setVisible(btn_id == 0)
-        self._predict_box.setVisible(btn_id != 0)
+        self._trade_box.setVisible(btn_id in (0, 2))
+        self._predict_box.setVisible(btn_id == 1)
 
     # ------------------------------------------------------------------
     # Trade
@@ -903,6 +1211,22 @@ class MainWindow(QMainWindow):
 
     def _on_trade_closed(self, trade, is_partial: bool = False):
         trade.planned_risk_pct = self._spn_risk_pct.value()
+        if self._session.mode == TrainingMode.CHALLENGE:
+            sym = self._session.symbol.code if self._session.symbol else ""
+            self._challenge_accumulated.append((sym, trade))
+            if not is_partial or self._session.position is None:
+                self._chart.remove_all_trade_lines()
+            self._chart.remove_all_limits()
+            self._pending_limit = None
+            self._refresh_markers()
+            self._update_position_display()
+            self._update_live_stats()
+            self._btn_write_review.setEnabled(False)
+            self._lbl_status.setText(f"平仓 {trade.exit_reason}  资金 {self._trade_mode.capital:,.0f}")
+            if isinstance(self._trade_mode, ChallengeTradeMode) and self._trade_mode.challenge_outcome:
+                self._end_challenge_run(self._trade_mode.challenge_outcome)
+            return
+
         if not is_partial or self._session.position is None:
             self._chart.remove_all_trade_lines()
         self._chart.remove_all_limits()
@@ -1163,6 +1487,29 @@ class MainWindow(QMainWindow):
 
         self._on_pause()
 
+        if self._session.mode == TrainingMode.CHALLENGE:
+            self._pending_review_trades.clear()
+            self._btn_write_review.setEnabled(False)
+            if self._session.position and self._trade_mode:
+                if self._trade_mode.can_close_position_now():
+                    closed = self._trade_mode.close("session_end")
+                    if closed:
+                        closed.planned_risk_pct = self._spn_risk_pct.value()
+                        sym = self._session.symbol.code if self._session.symbol else ""
+                        self._challenge_accumulated.append((sym, closed))
+                        if isinstance(self._trade_mode, ChallengeTradeMode) and self._trade_mode.challenge_outcome:
+                            self._session.finish()
+                            self._end_challenge_run(self._trade_mode.challenge_outcome)
+                            return
+                else:
+                    QMessageBox.information(
+                        self, "T+1",
+                        "当日买入尚未可卖出。将以当前状态结束挑战并保存为「放弃」。",
+                    )
+            self._session.finish()
+            self._chart.get_drawings(self._finish_challenge_abandon)
+            return
+
         if self._pending_review_trades:
             ans = QMessageBox.question(
                 self, "待复盘交易",
@@ -1329,7 +1676,13 @@ class MainWindow(QMainWindow):
 
     def _update_bar_label(self):
         label = self._session.timeframe.label if self._session.timeframe else ""
-        self._lbl_bar_info.setText(f"K线: {self._session.current_index}/{self._session.total_future_bars}  [{label}]")
+        if self._session.mode == TrainingMode.CHALLENGE:
+            self._lbl_bar_info.setText(
+                f"挑战日K累计 {self._challenge_bars_elapsed}  |  "
+                f"本股 {self._session.current_index}/{self._session.total_future_bars}  [{label}]"
+            )
+        else:
+            self._lbl_bar_info.setText(f"K线: {self._session.current_index}/{self._session.total_future_bars}  [{label}]")
 
     def _update_position_display(self):
         pos = self._session.position
@@ -1370,7 +1723,15 @@ class MainWindow(QMainWindow):
         self._btn_close_quarter.setEnabled(can_sell)
 
     def _update_live_stats(self):
-        if self._trade_mode:
+        if self._trade_mode and self._session.mode == TrainingMode.CHALLENGE:
+            tm = self._trade_mode
+            base = tm.summary_text()
+            if isinstance(tm, ChallengeTradeMode):
+                gap = max(0.0, tm.target_amount - tm.capital)
+                base = f"距目标还差约 {gap:,.0f} 元\n" + base
+            self._lbl_live_stats.setText(base)
+            self._lbl_score.setText("挑战模式")
+        elif self._trade_mode:
             self._lbl_live_stats.setText(self._trade_mode.summary_text())
             score = self._session.score or round(self._trade_mode.compute_stats().win_rate * 100)
             self._lbl_score.setText(f"会话分数 {score}")
@@ -1422,4 +1783,29 @@ class MainWindow(QMainWindow):
         self._play_timer.stop()
         self._cache.close()
         self._stats_service.close()
+        self._challenge_service.close()
         super().closeEvent(event)
+
+    def _on_random_batch_download(self) -> None:
+        n = self._spn_random_n.value()
+        force = self._chk_random_force.isChecked()
+        codes = self._provider.list_a_share_codes()
+        if not codes:
+            QMessageBox.warning(self, "失败", "无法获取 A 股列表，请检查网络或 AKShare。")
+            return
+        pick = random.sample(codes, min(n, len(codes)))
+        ok, bad = 0, 0
+        end_date = datetime.now().strftime("%Y%m%d")
+        for i, code in enumerate(pick):
+            self._lbl_status.setText(f"随机下载 {i + 1}/{len(pick)} {code} 日线...")
+            QApplication.processEvents()
+            sym = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
+            try:
+                self._engine.ensure_data(
+                    sym, Timeframe.DAILY, start_date="20100101", end_date=end_date, force=force,
+                )
+                ok += 1
+            except Exception:
+                bad += 1
+        self._lbl_status.setText(f"随机下载完成: 成功 {ok}，失败 {bad}")
+        self._refresh_data_table()
