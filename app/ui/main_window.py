@@ -54,7 +54,7 @@ from app.domain.candle import (
 from app.domain.market_rules import AShareRules
 from app.replay.engine import ReplayEngine
 from app.replay.session import ReplaySession, SessionState, TrainingMode
-from app.storage.challenge_service import ChallengeService
+from app.storage.challenge_service import ChallengeService, average_challenge_hold_days
 from app.storage.models import get_connection
 from app.storage.stats_service import StatsService
 from app.training.challenge_trade_mode import ChallengeTradeMode
@@ -135,7 +135,7 @@ class SessionPlanDialog(QDialog):
 
         grid.addWidget(QLabel("单笔风险%:"), 5, 0)
         self._spn_risk = QDoubleSpinBox()
-        self._spn_risk.setRange(0.1, 10.0)
+        self._spn_risk.setRange(0.1, 40.0)
         self._spn_risk.setDecimals(2)
         self._spn_risk.setSingleStep(0.25)
         self._spn_risk.setValue(1.0)
@@ -481,7 +481,7 @@ class MainWindow(QMainWindow):
         risk_row = QHBoxLayout()
         risk_row.addWidget(QLabel("风险%:"))
         self._spn_risk_pct = QDoubleSpinBox()
-        self._spn_risk_pct.setRange(0.1, 10.0)
+        self._spn_risk_pct.setRange(0.1, 40.0)
         self._spn_risk_pct.setDecimals(2)
         self._spn_risk_pct.setSingleStep(0.25)
         self._spn_risk_pct.setValue(1.0)
@@ -910,7 +910,7 @@ class MainWindow(QMainWindow):
         self._session.start()
         self._pending_limit = None
         self._chart.set_timeframe(tf)
-        self._chart.set_candles(visible)
+        self._chart.set_candles(visible, center_visible=True)
         self._chart.set_ma_data(visible)
         self._chart.clear_drawings()
         self._chart.remove_all_trade_lines()
@@ -918,10 +918,20 @@ class MainWindow(QMainWindow):
         self._update_bar_label()
         self._update_live_stats()
         self._update_position_display()
+        n_vis = len(visible)
+        QTimer.singleShot(120, lambda: self._chart.fit_center_visible(n_vis))
+        QTimer.singleShot(280, lambda: self._chart.reset_price_autoscale())
         return True
 
     def _on_challenge_switch_stock(self) -> None:
-        if self._session.mode != TrainingMode.CHALLENGE or self._session.state != SessionState.RUNNING:
+        if self._session.mode != TrainingMode.CHALLENGE:
+            return
+        # K 线用尽后会话为 FINISHED，但仍需允许换股票续挑战（空仓时）
+        if self._session.state not in (
+            SessionState.RUNNING,
+            SessionState.PAUSED,
+            SessionState.FINISHED,
+        ):
             return
         if self._session.position:
             QMessageBox.information(self, "换股票", "当前仍有持仓，请先平仓后再切换股票。")
@@ -977,7 +987,7 @@ class MainWindow(QMainWindow):
         trades_pairs: List[Tuple[str, ClosedTrade]] = list(self._challenge_accumulated)
         trade_list = [t for _, t in trades_pairs]
         stats = tm.compute_stats(trade_list) if trade_list else None
-        avg_hold = stats.avg_hold_bars if stats else 0.0
+        avg_hold = average_challenge_hold_days(trade_list)
         win_rate = stats.win_rate if stats else 0.0
         tc = stats.total_trades if stats else 0
         total_comm = stats.total_commission if stats else 0.0
@@ -1225,6 +1235,10 @@ class MainWindow(QMainWindow):
             self._lbl_status.setText(f"平仓 {trade.exit_reason}  资金 {self._trade_mode.capital:,.0f}")
             if isinstance(self._trade_mode, ChallengeTradeMode) and self._trade_mode.challenge_outcome:
                 self._end_challenge_run(self._trade_mode.challenge_outcome)
+                return
+            # 本股 K 线已到头(FINISHED)且已空仓：自动换下一只，避免必须点「换股票」却无效
+            if self._session.state == SessionState.FINISHED and self._session.position is None:
+                self._challenge_auto_switch_after_exhaust()
             return
 
         if not is_partial or self._session.position is None:

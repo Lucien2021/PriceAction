@@ -74,12 +74,17 @@ class ChartWidget(QWebEngineView):
     def set_timeframe(self, tf: Timeframe) -> None:
         self._timeframe = tf
 
-    def set_candles(self, candles: List[Candle]) -> None:
+    def set_candles(self, candles: List[Candle], *, center_visible: bool = False) -> None:
         candle_data = [c.to_chart_dict(self._timeframe) for c in candles]
         volume_data = [c.to_volume_dict(self._timeframe) for c in candles]
         extra = self._build_extra(candles)
-        self._run_js(f"setData({json.dumps(candle_data)}, {json.dumps(volume_data)})")
-        self._run_js(f"setExtraData({json.dumps(extra)})")
+        if center_visible:
+            self._run_js(
+                f"setDataCentered({json.dumps(candle_data)}, {json.dumps(volume_data)}, {json.dumps(extra)})"
+            )
+        else:
+            self._run_js(f"setData({json.dumps(candle_data)}, {json.dumps(volume_data)})")
+            self._run_js(f"setExtraData({json.dumps(extra)})")
         if candles:
             self._last_close = candles[-1].close
 
@@ -97,6 +102,7 @@ class ChartWidget(QWebEngineView):
 
     def set_ma_data(self, candles: List[Candle], period: int = 20) -> None:
         if len(candles) < period:
+            self._run_js("setMAData([])")
             return
         ma_data = []
         for i in range(period - 1, len(candles)):
@@ -154,6 +160,18 @@ class ChartWidget(QWebEngineView):
 
     def fit(self) -> None:
         self._run_js("fitContent()")
+
+    def reset_price_autoscale(self) -> None:
+        """恢复价格轴自动缩放（换股票、手动缩放过后可调用）。"""
+        self._run_js("resetMainPriceScaleAutoCenter()")
+
+    def fit_center_visible(self, bar_count: int) -> None:
+        """布局稳定后：重置价格 autoScale + 时间轴居中大部分 K 线。"""
+        n = max(0, int(bar_count))
+        if n <= 0:
+            self._run_js("resetMainPriceScaleAutoCenter()")
+            return
+        self._run_js(f"refitAfterStockSwitch({n})")
 
     # ------------------------------------------------------------------
     # Limit orders

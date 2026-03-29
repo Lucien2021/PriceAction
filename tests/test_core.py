@@ -6,8 +6,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from datetime import datetime, timedelta
 
 from app.domain.candle import (
-    Candle, Symbol, Timeframe, MarketType,
-    TradeDirection, PredictionDirection,
+    Candle,
+    ClosedTrade,
+    Symbol,
+    Timeframe,
+    MarketType,
+    TradeDirection,
+    PredictionDirection,
 )
 from app.domain.market_rules import AShareRules, FutureRules
 from app.replay.session import ReplaySession, TrainingMode, SessionState
@@ -15,7 +20,7 @@ from app.training.trade_mode import TradeMode, TradeStats
 from app.training.predict_mode import PredictMode
 from app.storage.models import get_connection
 from app.storage.stats_service import StatsService
-from app.storage.challenge_service import ChallengeService
+from app.storage.challenge_service import ChallengeService, average_challenge_hold_days
 from app.training.challenge_trade_mode import ChallengeTradeMode
 from app.data.cache.repository import CacheRepository
 from app.data.providers.akshare_provider import AKShareProvider
@@ -321,6 +326,32 @@ def test_challenge_trade_mode_outcome():
     assert ctm2.challenge_outcome == "lose"
 
 
+def test_average_challenge_hold_days():
+    from datetime import datetime as dt
+    t1 = ClosedTrade(
+        direction=TradeDirection.LONG,
+        entry_price=10.0,
+        exit_price=11.0,
+        quantity=100,
+        entry_time=dt(2026, 1, 1),
+        exit_time=dt(2026, 1, 5),
+        entry_bar_index=100,
+        exit_bar_index=103,
+    )
+    t2 = ClosedTrade(
+        direction=TradeDirection.LONG,
+        entry_price=10.0,
+        exit_price=9.0,
+        quantity=100,
+        entry_time=dt(2026, 1, 6),
+        exit_time=dt(2026, 1, 6),
+        entry_bar_index=200,
+        exit_bar_index=200,
+    )
+    assert average_challenge_hold_days([t1]) == 4.0
+    assert abs(average_challenge_hold_days([t1, t2]) - 2.5) < 1e-6
+
+
 def test_challenge_service_save():
     conn = get_connection(":memory:")
     svc = ChallengeService(conn)
@@ -362,5 +393,6 @@ if __name__ == "__main__":
     test_stop_loss_gap_fill_at_open()
     test_challenge_slice_contiguous_tail()
     test_challenge_trade_mode_outcome()
+    test_average_challenge_hold_days()
     test_challenge_service_save()
     print("\n=== ALL TESTS PASSED ===")

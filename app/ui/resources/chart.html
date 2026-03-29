@@ -50,7 +50,11 @@ function initChart(){
     layout:{background:{type:'solid',color:'#1e222d'},textColor:'#d1d4dc'},
     grid:{vertLines:{color:'#2B2B43'},horzLines:{color:'#2B2B43'}},
     crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
-    rightPriceScale:{borderColor:'#2B2B43'},
+    rightPriceScale:{
+      borderColor:'#2B2B43',
+      autoScale:true,
+      scaleMargins:{top:0.12,bottom:0.1},
+    },
     timeScale:{borderColor:'#2B2B43',timeVisible:true,secondsVisible:false},
     width:window.innerWidth,height:window.innerHeight,
   });
@@ -120,16 +124,92 @@ function fmtVol(v){
 /* ================================================================
    DATA API
    ================================================================ */
+/** 恢复右侧价格轴自动缩放（滚轮缩放后会关掉 autoScale，换股票后必须重置，否则 K 线挤在底部） */
+function resetMainPriceScaleAutoCenter(){
+  if(!chart)return;
+  var m={top:0.14,bottom:0.12};
+  try{
+    chart.priceScale('right').applyOptions({autoScale:true,scaleMargins:m});
+  }catch(e0){}
+  try{
+    if(candleSeries&&candleSeries.priceScale){
+      candleSeries.priceScale().applyOptions({autoScale:true,scaleMargins:m});
+    }
+  }catch(e1){}
+}
 function setData(candles,volumes){
   if(!candleSeries)return;
+  resetMainPriceScaleAutoCenter();
+  if(maSeries)maSeries.setData([]);
   candleSeries.setData(candles);volumeSeries.setData(volumes);
+  if(candles&&candles.length){
+    chart.timeScale().fitContent();
+    requestAnimationFrame(function(){
+      resetMainPriceScaleAutoCenter();
+    });
+  }
+}
+/** 切换股票后 WebEngine 布局稳定后再居中一次（避免首帧宽度为 0 导致看不见 K 线） */
+function fitCenterVisibleBarCount(n){
+  if(!chart||!candleSeries||!n)return;
+  resetMainPriceScaleAutoCenter();
   chart.timeScale().fitContent();
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      resetMainPriceScaleAutoCenter();
+      try{
+        var want=Math.min(n,Math.max(35,Math.round(n*0.72)));
+        var from=Math.max(0,(n-want)/2);
+        var to=from+want-1;
+        chart.timeScale().setVisibleLogicalRange({from:from,to:to});
+      }catch(e){
+        chart.timeScale().fitContent();
+      }
+      requestAnimationFrame(function(){ resetMainPriceScaleAutoCenter(); });
+    });
+  });
+}
+/** 延迟再跑一次：MA 与布局都就绪后修正价格轴 + 时间轴 */
+function refitAfterStockSwitch(n){
+  resetMainPriceScaleAutoCenter();
+  fitCenterVisibleBarCount(n|0);
+}
+/** 全量替换 K 线并让「中间大部分 K 线」落在视窗中央（切换股票等场景） */
+function setDataCentered(candles,volumes,extra){
+  _extraData=extra||{};
+  if(!candleSeries)return;
+  resetMainPriceScaleAutoCenter();
+  if(maSeries)maSeries.setData([]);
+  candleSeries.setData(candles||[]);volumeSeries.setData(volumes||[]);
+  if(!candles||!candles.length)return;
+  var n=candles.length;
+  chart.timeScale().fitContent();
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      resetMainPriceScaleAutoCenter();
+      try{
+        var want=Math.min(n,Math.max(35,Math.round(n*0.72)));
+        var from=Math.max(0,(n-want)/2);
+        var to=from+want-1;
+        chart.timeScale().setVisibleLogicalRange({from:from,to:to});
+      }catch(e){
+        chart.timeScale().fitContent();
+      }
+      requestAnimationFrame(function(){ resetMainPriceScaleAutoCenter(); });
+    });
+  });
 }
 function addCandle(candle,volume){
   if(!candleSeries)return;
   candleSeries.update(candle);volumeSeries.update(volume);
 }
-function setMAData(data){ if(maSeries)maSeries.setData(data); }
+function setMAData(data){
+  if(maSeries)maSeries.setData(data||[]);
+  requestAnimationFrame(function(){
+    resetMainPriceScaleAutoCenter();
+    requestAnimationFrame(function(){ resetMainPriceScaleAutoCenter(); });
+  });
+}
 function addMAPoint(pt){ if(maSeries)maSeries.update(pt); }
 function setMarkers(m){ if(candleSeries)candleSeries.setMarkers(m); }
 function getDrawingsJSON(){ return JSON.stringify(drawings||[]); }
@@ -143,9 +223,11 @@ function setDrawingsJSON(payload){
   }
 }
 function clearChart(){
+  resetMainPriceScaleAutoCenter();
   if(candleSeries)candleSeries.setData([]);
   if(volumeSeries)volumeSeries.setData([]);
   if(maSeries)maSeries.setData([]);
+  resetMainPriceScaleAutoCenter();
 }
 function fitContent(){if(chart)chart.timeScale().fitContent()}
 

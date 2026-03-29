@@ -11,6 +11,17 @@ from app.domain.candle import ClosedTrade
 from app.storage.models import get_connection
 
 
+def average_challenge_hold_days(trades: List[ClosedTrade]) -> float:
+    """挑战复盘用：每笔持仓经历的 K 线根数（含入场与平仓所在 K）之平均；日 K 即自然日。"""
+    if not trades:
+        return 0.0
+    total = 0.0
+    for t in trades:
+        span = t.exit_bar_index - t.entry_bar_index + 1
+        total += float(max(1, span))
+    return total / len(trades)
+
+
 @dataclass
 class ChallengeRunRecord:
     id: int
