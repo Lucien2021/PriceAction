@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextEdit,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
@@ -65,6 +66,48 @@ from app.ui.challenge_review_panel import ChallengeReviewPanel
 from app.ui.review_panel import ReviewPanel
 
 _SNAPSHOT_DIR = Path.home() / ".priceaction" / "snapshots"
+
+
+class _BatchDownloadWorker(QThread):
+    """后台线程：批量下载股票数据。
+
+    SQLite 连接不能跨线程，所以在 run() 里创建独立的
+    CacheRepository + ReplayEngine，写入同一个 cache.db。
+    """
+    progress = Signal(int, int, str)   # (当前, 总数, 描述)
+    finished = Signal(int, int)        # (成功, 失败)
+
+    def __init__(self, provider: "AKShareProvider", codes: List[str], force: bool, parent=None):
+        super().__init__(parent)
+        self._provider = provider
+        self._codes = codes
+        self._force = force
+
+    def run(self):
+        from app.data.cache.repository import CacheRepository as _Cache
+        from app.replay.engine import ReplayEngine as _Engine
+        cache = _Cache()
+        engine = _Engine(cache, self._provider)
+        ok = bad = 0
+        total = len(self._codes)
+        end_date = datetime.now().strftime("%Y%m%d")
+        for i, code in enumerate(self._codes):
+            self.progress.emit(i, total, code)
+            sym = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
+            try:
+                engine.ensure_data(
+                    sym, Timeframe.DAILY,
+                    start_date="20100101", end_date=end_date,
+                    force=self._force,
+                )
+                ok += 1
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("下载 %s 失败: %s", code, exc)
+                bad += 1
+        cache.close()
+        self.finished.emit(ok, bad)
+
 
 _TF_OPTIONS = [
     ("月线", Timeframe.MONTHLY),
@@ -674,6 +717,12 @@ class MainWindow(QMainWindow):
         rand_row.addWidget(self._btn_random_download)
         rand_row.addStretch()
         layout.addLayout(rand_row)
+
+        self._download_progress = QProgressBar()
+        self._download_progress.setVisible(False)
+        self._download_progress.setTextVisible(True)
+        self._download_progress.setFormat("%v / %m  %p%")
+        layout.addWidget(self._download_progress)
 
         btn_row = QHBoxLayout()
         self._btn_refresh_data = QPushButton("刷新列表")
@@ -1801,25 +1850,48 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _on_random_batch_download(self) -> None:
+        if hasattr(self, "_download_worker") and self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "提示", "正在下载中，请等待当前任务完成。")
+            return
+
         n = self._spn_random_n.value()
         force = self._chk_random_force.isChecked()
+
+        self._btn_random_download.setEnabled(False)
+        self._lbl_status.setText("正在获取 A 股代码列表...")
+        QApplication.processEvents()
+
         codes = self._provider.list_a_share_codes()
         if not codes:
-            QMessageBox.warning(self, "失败", "无法获取 A 股列表，请检查网络或 AKShare。")
+            self._btn_random_download.setEnabled(True)
+            detail = (self._provider.last_a_share_list_error or "").strip()
+            msg = (
+                "无法获取 A 股代码列表。\n\n"
+                "请检查网络/防火墙，或执行：pip install -U akshare\n\n"
+            )
+            if detail:
+                msg += f"详情：\n{detail[:800]}"
+            QMessageBox.warning(self, "随机下载失败", msg)
             return
+
         pick = random.sample(codes, min(n, len(codes)))
-        ok, bad = 0, 0
-        end_date = datetime.now().strftime("%Y%m%d")
-        for i, code in enumerate(pick):
-            self._lbl_status.setText(f"随机下载 {i + 1}/{len(pick)} {code} 日线...")
-            QApplication.processEvents()
-            sym = Symbol(code=code, name=code, market_type=MarketType.A_SHARE)
-            try:
-                self._engine.ensure_data(
-                    sym, Timeframe.DAILY, start_date="20100101", end_date=end_date, force=force,
-                )
-                ok += 1
-            except Exception:
-                bad += 1
-        self._lbl_status.setText(f"随机下载完成: 成功 {ok}，失败 {bad}")
+
+        self._download_progress.setMaximum(len(pick))
+        self._download_progress.setValue(0)
+        self._download_progress.setVisible(True)
+
+        self._download_worker = _BatchDownloadWorker(self._provider, pick, force, parent=self)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.finished.connect(self._on_download_batch_finished)
+        self._download_worker.start()
+
+    def _on_download_progress(self, current: int, total: int, code: str) -> None:
+        self._download_progress.setValue(current)
+        self._lbl_status.setText(f"下载 {current + 1}/{total}  {code} ...")
+
+    def _on_download_batch_finished(self, ok: int, bad: int) -> None:
+        self._download_progress.setVisible(False)
+        self._btn_random_download.setEnabled(True)
+        self._lbl_status.setText(f"下载完成: 成功 {ok}，失败 {bad}")
+        self._download_worker = None
         self._refresh_data_table()

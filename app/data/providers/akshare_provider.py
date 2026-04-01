@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import json as _json
 import logging
+import os
 import time
 from datetime import datetime, date
-from typing import List, Optional
+from pathlib import Path
+from typing import Callable, List, Optional, Set
 
 import requests as _requests
 from requests.adapters import HTTPAdapter as _HTTPAdapter
 from urllib3.util.retry import Retry as _Retry
 
-# 东方财富接口：无浏览器头、走系统坏代理、单次区间过长时常见 RemoteDisconnected / ProxyError。
-# 在 import akshare 之前打补丁，使 akshare 内建的 requests.get 也生效。
 _EASTMONEY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -31,6 +32,7 @@ _http_retry = _Retry(
 )
 _orig_session_init = _requests.Session.__init__
 
+
 def _patched_session_init(self, *args, **kwargs):
     _orig_session_init(self, *args, **kwargs)
     self.trust_env = False
@@ -42,6 +44,7 @@ def _patched_session_init(self, *args, **kwargs):
     )
     self.mount("https://", adapter)
     self.mount("http://", adapter)
+
 
 _requests.Session.__init__ = _patched_session_init
 
@@ -59,7 +62,6 @@ def _eastmoney_session() -> _requests.Session:
 def _patched_requests_get(url, params=None, **kwargs):
     u = url if isinstance(url, str) else str(url)
     if "eastmoney.com" in u:
-        # 注意：不能把 kline 的 push2his 换成 push2——push2 上同路径常返回空 klines。
         kwargs.setdefault("timeout", 60)
         return _eastmoney_session().get(u, params=params, **kwargs)
     return _orig_requests_get(url, params=params, **kwargs)
@@ -67,10 +69,10 @@ def _patched_requests_get(url, params=None, **kwargs):
 
 _requests.get = _patched_requests_get
 
-import akshare as ak
-import pandas as pd
+import akshare as ak  # noqa: E402
+import pandas as pd  # noqa: E402
 
-from app.domain.candle import Candle, Symbol, Timeframe, MarketType
+from app.domain.candle import Candle, Symbol, Timeframe, MarketType  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -87,16 +89,18 @@ _PERIOD_MAP = {
 
 _MAX_RETRIES = 5
 _BASE_DELAY = 2.0
-_REQUEST_INTERVAL = 2.0
-# 东方财富连续失败时尽快切腾讯，避免单次请求卡太久。
+_REQUEST_INTERVAL = 1.0
 _EM_RETRIES = 3
 _EM_BASE_DELAY = 1.5
-# 日线单次拉取过长区间时，东方财富端容易直接掐连接；按年拆分可明显降低失败率。
 _CHUNK_MAX_DAYS = 366
+
+# --------------- 股票列表缓存 ---------------
+_CACHE_DIR = Path(os.environ.get("PRICE_ACTION_DATA", Path.home() / ".price_action"))
+_CODE_CACHE_FILE = _CACHE_DIR / "a_share_codes.json"
+_CODE_CACHE_TTL = 7 * 86400  # 7 天
 
 
 def _retry(fn, *, retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY):
-    """Call *fn* with exponential-backoff retry on failure."""
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
@@ -108,6 +112,96 @@ def _retry(fn, *, retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY):
                 log.warning("attempt %d/%d failed (%s), retry in %.1fs", attempt, retries, exc, wait)
                 time.sleep(wait)
     raise last_err  # type: ignore[misc]
+
+
+# --------------- 快速获取 A 股代码（不依赖 AKShare） ---------------
+
+def _fetch_codes_cninfo() -> List[str]:
+    """巨潮资讯 JSON API，单次请求 ~2 秒拿到全市场 A 股代码。"""
+    url = "http://www.cninfo.com.cn/new/data/szse_stock.json"
+    headers = {"User-Agent": _EASTMONEY_HEADERS["User-Agent"], "Accept": "application/json"}
+    resp = _requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("stockList", data) if isinstance(data, dict) else data
+    codes: List[str] = []
+    seen: Set[str] = set()
+    for it in items:
+        cat = str(it.get("category", ""))
+        if "A" not in cat:
+            continue
+        c = str(it.get("code", "")).strip().zfill(6)
+        if len(c) == 6 and c not in seen:
+            seen.add(c)
+            codes.append(c)
+    return codes
+
+
+def _fetch_codes_em_json() -> List[str]:
+    """东方财富 JSON API，分页取全量（每页 5000，约 2 次请求）。"""
+    url = "http://push2.eastmoney.com/api/qt/clist/get"
+    base_params = {
+        "po": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2", "invt": "2", "fid": "f3",
+        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+        "fields": "f12",
+    }
+    headers = {"User-Agent": _EASTMONEY_HEADERS["User-Agent"]}
+    codes: List[str] = []
+    seen: Set[str] = set()
+    pn = 1
+    while True:
+        params = {**base_params, "pn": str(pn), "pz": "5000"}
+        resp = _requests.get(url, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
+        body = resp.json()
+        d = body.get("data")
+        if not d:
+            break
+        diff = d.get("diff", {})
+        items = diff.values() if isinstance(diff, dict) else diff
+        batch = 0
+        for it in items:
+            c = str(it.get("f12", "")).strip()
+            if c and c not in seen:
+                seen.add(c)
+                codes.append(c)
+                batch += 1
+        if batch == 0:
+            break
+        pn += 1
+        if pn > 20:
+            break
+    return codes
+
+
+def _load_cached_codes() -> Optional[List[str]]:
+    try:
+        if not _CODE_CACHE_FILE.exists():
+            return None
+        age = time.time() - _CODE_CACHE_FILE.stat().st_mtime
+        if age > _CODE_CACHE_TTL:
+            return None
+        data = _json.loads(_CODE_CACHE_FILE.read_text(encoding="utf-8"))
+        codes = data.get("codes", [])
+        if len(codes) >= 500:
+            return codes
+    except Exception:
+        pass
+    return None
+
+
+def _save_codes_cache(codes: List[str]) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _CODE_CACHE_FILE.write_text(
+            _json.dumps({"ts": time.time(), "count": len(codes), "codes": codes},
+                        ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def _stock_zh_a_hist_chunked(
@@ -226,14 +320,46 @@ def _daily_via_tencent(
     return _resample_tx_daily_to_period(out, period)
 
 
+def _codes_from_dataframe(df: Optional[pd.DataFrame]) -> List[str]:
+    """从 AKShare 返回的 DataFrame 中提取股票代码。"""
+    if df is None or df.empty:
+        return []
+    code_col = None
+    for name in df.columns:
+        nstr = str(name)
+        if nstr.lower() == "code" or "代码" in nstr:
+            code_col = name
+            break
+    if code_col is None:
+        for name in df.columns:
+            if "code" in str(name).lower():
+                code_col = name
+                break
+    if code_col is None and len(df.columns) >= 1:
+        code_col = df.columns[0]
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in df[code_col]:
+        s = str(raw).strip()
+        if "." in s:
+            s = s.split(".")[0]
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if 4 <= len(digits) <= 6:
+            c = digits.zfill(6)
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
+
+
 class AKShareProvider:
     """Fetch A-share historical data via AKShare."""
 
     def __init__(self):
         self._last_request_ts: float = 0.0
+        self.last_a_share_list_error: str = ""
 
     def _throttle(self):
-        """Ensure minimum interval between consecutive API calls."""
         elapsed = time.monotonic() - self._last_request_ts
         if elapsed < _REQUEST_INTERVAL:
             time.sleep(_REQUEST_INTERVAL - elapsed)
@@ -256,28 +382,81 @@ class AKShareProvider:
         return self._fetch_intraday(symbol, timeframe, period, start_date, end_date, adjust)
 
     def search_symbols(self, keyword: str) -> List[Symbol]:
-        try:
-            df = ak.stock_info_a_code_name()
-        except Exception:
-            return []
-        mask = df["code"].str.contains(keyword) | df["name"].str.contains(keyword, na=False)
+        codes = self.list_a_share_codes()
         results: List[Symbol] = []
-        for _, row in df[mask].head(50).iterrows():
-            results.append(Symbol(code=row["code"], name=row["name"], market_type=MarketType.A_SHARE))
-        return results
+        for c in codes:
+            if keyword in c:
+                results.append(Symbol(code=c, name=c, market_type=MarketType.A_SHARE))
+        if len(results) < 50:
+            try:
+                df = ak.stock_info_a_code_name()
+                mask = df["code"].str.contains(keyword) | df["name"].str.contains(keyword, na=False)
+                for _, row in df[mask].head(50).iterrows():
+                    results.append(Symbol(code=row["code"], name=row["name"], market_type=MarketType.A_SHARE))
+            except Exception:
+                pass
+        return results[:50]
 
     def list_a_share_codes(self) -> List[str]:
+        """获取全市场 A 股代码。优先级：本地缓存 → 巨潮 → 东财JSON → AKShare。"""
+        self.last_a_share_list_error = ""
+
+        cached = _load_cached_codes()
+        if cached:
+            return cached
+
+        err_parts: List[str] = []
+
+        # ---- 1. 巨潮资讯 JSON（最快，单次 ~2s） ----
         try:
-            df = ak.stock_info_a_code_name()
+            codes = _fetch_codes_cninfo()
+            if len(codes) >= 500:
+                _save_codes_cache(codes)
+                log.info("巨潮资讯获取 %d 只 A 股代码", len(codes))
+                return codes
+        except Exception as exc:
+            err_parts.append(f"cninfo: {exc}")
+            log.warning("巨潮资讯 API 失败: %s", exc)
+
+        # ---- 2. 东方财富 JSON API ----
+        try:
+            codes = _fetch_codes_em_json()
+            if len(codes) >= 500:
+                _save_codes_cache(codes)
+                log.info("东财JSON获取 %d 只 A 股代码", len(codes))
+                return codes
+        except Exception as exc:
+            err_parts.append(f"em_json: {exc}")
+            log.warning("东财 JSON API 失败: %s", exc)
+
+        # ---- 3. AKShare 兜底 ----
+        for fn_name in ("stock_zh_a_spot_em", "stock_info_a_code_name"):
+            try:
+                self._throttle()
+                df = getattr(ak, fn_name)()
+                if df is not None and not df.empty:
+                    codes = _codes_from_dataframe(df)
+                    if len(codes) >= 500:
+                        _save_codes_cache(codes)
+                        log.info("%s 获取 %d 只 A 股代码", fn_name, len(codes))
+                        return codes
+            except Exception as exc:
+                err_parts.append(f"{fn_name}: {exc}")
+                log.warning("%s 失败: %s", fn_name, exc)
+
+        # ---- 4. 过期缓存也比没有好 ----
+        try:
+            if _CODE_CACHE_FILE.exists():
+                data = _json.loads(_CODE_CACHE_FILE.read_text(encoding="utf-8"))
+                codes = data.get("codes", [])
+                if codes:
+                    log.info("使用过期缓存 (%d 只)", len(codes))
+                    return codes
         except Exception:
-            return []
-        out: List[str] = []
-        for raw in df["code"].astype(str):
-            c = raw.strip()
-            if c.isdigit():
-                c = c.zfill(6)
-            out.append(c)
-        return out
+            pass
+
+        self.last_a_share_list_error = "；".join(err_parts) if err_parts else "全部接口失败"
+        return []
 
     # ------------------------------------------------------------------
 
