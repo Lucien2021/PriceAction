@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     plan_direction TEXT DEFAULT '',
     plan_invalidation TEXT DEFAULT '',
     difficulty    INTEGER DEFAULT 0,
-    score         INTEGER DEFAULT 0
+    score         INTEGER DEFAULT 0,
+    training_goal TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -161,6 +162,17 @@ CREATE TABLE IF NOT EXISTS challenge_trades (
 
 CREATE INDEX IF NOT EXISTS idx_challenge_trades_run ON challenge_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_runs_target ON challenge_runs(target_amount);
+
+CREATE TABLE IF NOT EXISTS discipline_violations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(id),
+    created_at      TEXT NOT NULL,
+    violation_type  TEXT NOT NULL,
+    severity        TEXT NOT NULL DEFAULT 'warning',
+    details         TEXT DEFAULT '',
+    bar_index       INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_violations_session ON discipline_violations(session_id);
 """
 
 _MIGRATIONS = [
@@ -181,6 +193,7 @@ _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN position_id TEXT DEFAULT ''",
     "ALTER TABLE trades ADD COLUMN equity_before REAL DEFAULT 0",
     "ALTER TABLE trades ADD COLUMN equity_after REAL DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN training_goal TEXT DEFAULT ''",
 ]
 
 

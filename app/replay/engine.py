@@ -13,6 +13,14 @@ from app.data.providers.akshare_provider import AKShareProvider
 
 TRAINING_TFS = [Timeframe.MONTHLY, Timeframe.DAILY, Timeframe.M5, Timeframe.M1]
 
+DIFFICULTY_PROFILES = {
+    1: {"visible_delta": 20, "future_delta": 0, "threshold_scale": 1.5},
+    2: {"visible_delta": 10, "future_delta": 0, "threshold_scale": 1.25},
+    3: {"visible_delta": 0,  "future_delta": 0, "threshold_scale": 1.0},
+    4: {"visible_delta": -10, "future_delta": 0, "threshold_scale": 0.75},
+    5: {"visible_delta": -20, "future_delta": 0, "threshold_scale": 0.5},
+}
+
 _USED_DB = Path.home() / ".priceaction" / "used_ranges.db"
 
 
@@ -109,7 +117,12 @@ class ReplayEngine:
         date_start: Optional[datetime] = None,
         date_end: Optional[datetime] = None,
         scenario_tag: str = "",
+        difficulty: int = 3,
     ) -> Tuple[List[Candle], List[Candle]]:
+        profile = DIFFICULTY_PROFILES.get(max(1, min(5, difficulty)), DIFFICULTY_PROFILES[3])
+        visible_bars = max(20, visible_bars + profile["visible_delta"])
+        future_bars = max(20, future_bars + profile["future_delta"])
+
         all_candles = self._cache.load_candles(symbol, timeframe)
         all_candles = self._trim_negative_qfq(all_candles)
         if date_start or date_end:
@@ -142,6 +155,7 @@ class ReplayEngine:
             visible_bars=visible_bars,
             future_bars=future_bars,
             scenario_tag=scenario_tag,
+            difficulty=difficulty,
         ) or candidates
 
         if not candidates:
@@ -171,10 +185,14 @@ class ReplayEngine:
         visible_bars: int,
         future_bars: int,
         scenario_tag: str,
+        difficulty: int = 3,
     ) -> List[int]:
         tag = (scenario_tag or "").strip().lower()
         if not tag:
             return candidates
+
+        profile = DIFFICULTY_PROFILES.get(max(1, min(5, difficulty)), DIFFICULTY_PROFILES[3])
+        ts = profile["threshold_scale"]
 
         matched: List[int] = []
         total_needed = visible_bars + future_bars
@@ -184,13 +202,20 @@ class ReplayEngine:
                 continue
             visible = window[:visible_bars]
             future = window[visible_bars:]
-            if self._match_scenario(visible, future, tag):
+            if self._match_scenario(visible, future, tag, ts):
                 matched.append(start)
         return matched
 
-    def _match_scenario(self, visible: List[Candle], future: List[Candle], tag: str) -> bool:
+    def _match_scenario(
+        self,
+        visible: List[Candle],
+        future: List[Candle],
+        tag: str,
+        threshold_scale: float = 1.0,
+    ) -> bool:
         if not visible or not future:
             return False
+        ts = threshold_scale
         vis_start = visible[0].close
         vis_end = visible[-1].close
         fut_end = future[-1].close
@@ -204,29 +229,62 @@ class ReplayEngine:
         future_move = (fut_end - vis_end) / vis_end if vis_end else 0.0
 
         if tag in {"趋势回踩", "trend_pullback", "trend", "趋势"}:
-            return visible_move > 0.03 and future_low <= vis_end * 0.985 and fut_end >= vis_end
+            return (
+                visible_move > 0.03 * ts
+                and future_low <= vis_end * (1 - 0.015 * ts)
+                and fut_end >= vis_end
+            )
 
         if tag in {"区间突破", "range_breakout", "breakout"}:
             return (
-                vis_range / vis_end < 0.08
-                and (future_high > vis_high * 1.01 or future_low < vis_low * 0.99)
+                vis_range / vis_end < 0.08 / ts
+                and (future_high > vis_high * (1 + 0.01 * ts)
+                     or future_low < vis_low * (1 - 0.01 * ts))
             )
 
         if tag in {"假突破", "false_breakout"}:
-            broke_up = future_high > vis_high * 1.01 and fut_end < vis_high
-            broke_down = future_low < vis_low * 0.99 and fut_end > vis_low
+            broke_up = future_high > vis_high * (1 + 0.01 * ts) and fut_end < vis_high
+            broke_down = future_low < vis_low * (1 - 0.01 * ts) and fut_end > vis_low
             return broke_up or broke_down
 
         if tag in {"反转确认", "reversal_confirm", "reversal"}:
-            return visible_move * future_move < 0 and abs(future_move) > 0.02
+            return visible_move * future_move < 0 and abs(future_move) > 0.02 * ts
 
         if tag in {"高波动", "high_volatility"}:
-            return (future_high - future_low) / max(vis_end, 1e-6) > 0.08
+            return (future_high - future_low) / max(vis_end, 1e-6) > 0.08 * ts
 
         if tag in {"震荡", "range"}:
-            return abs(total_move) < 0.03 and (future_high - future_low) / max(vis_end, 1e-6) < 0.1
+            return (
+                abs(total_move) < 0.03 / ts
+                and (future_high - future_low) / max(vis_end, 1e-6) < 0.1 / ts
+            )
 
         return True
+
+    def load_mistake_slice(
+        self,
+        symbol: Symbol,
+        timeframe: Timeframe,
+        slice_start: int,
+        slice_end: int,
+        context_before: int = 30,
+        future_after: int = 60,
+    ) -> Tuple[List[Candle], List[Candle]]:
+        """Load a slice around a mistake for re-training.
+
+        Returns (visible, future) where visible starts `context_before` bars
+        before slice_start and future extends `future_after` bars past slice_end.
+        """
+        all_candles = self.load_all(symbol, timeframe)
+        vis_start = max(0, slice_start - context_before)
+        fut_end = min(len(all_candles), slice_end + future_after)
+        if vis_start >= slice_start or slice_start >= len(all_candles):
+            raise ValueError("错题切片索引超出数据范围")
+        visible = all_candles[vis_start:slice_start]
+        future = all_candles[slice_start:fut_end]
+        if not visible or not future:
+            raise ValueError("错题切片数据不足")
+        return visible, future
 
     def get_candles_for_date_range(
         self,

@@ -134,6 +134,18 @@ _MISTAKE_TAGS = [
     "错过入场", "无效加仓", "仓位过大", "结构误判",
 ]
 
+_TRAINING_GOALS = [
+    "",
+    "等待回踩确认再入场",
+    "严格按计划止损",
+    "不做计划外交易",
+    "识别假突破结构",
+    "控制仓位不超风险",
+    "耐心持仓至止盈",
+    "只在关键位入场",
+    "自定义",
+]
+
 
 # ======================================================================
 # Dialogs
@@ -189,6 +201,13 @@ class SessionPlanDialog(QDialog):
         self._spn_risk.setValue(1.0)
         self._spn_risk.setEnabled(mode == TrainingMode.TRADE)
         grid.addWidget(self._spn_risk, 5, 1)
+
+        grid.addWidget(QLabel("训练目标:"), 6, 0)
+        self._cmb_goal = QComboBox()
+        self._cmb_goal.setEditable(True)
+        for g in _TRAINING_GOALS:
+            self._cmb_goal.addItem(g or "无特定目标")
+        grid.addWidget(self._cmb_goal, 6, 1)
         layout.addLayout(grid)
 
         self._txt_notes = QTextEdit()
@@ -206,6 +225,9 @@ class SessionPlanDialog(QDialog):
         layout.addWidget(buttons)
 
     def get_plan(self) -> dict:
+        goal_text = self._cmb_goal.currentText().strip()
+        if goal_text == "无特定目标":
+            goal_text = ""
         return {
             "setup_type": self._cmb_setup.currentText().strip(),
             "scenario_tag": self._cmb_scenario.currentData() or "",
@@ -214,6 +236,7 @@ class SessionPlanDialog(QDialog):
             "risk_pct": self._spn_risk.value(),
             "difficulty": self._spn_difficulty.value(),
             "plan_notes": self._txt_notes.toPlainText().strip(),
+            "training_goal": goal_text,
         }
 
 
@@ -786,6 +809,7 @@ class MainWindow(QMainWindow):
         self._chart.limit_price_changed.connect(self._on_limit_price_dragged)
         self._chart.trade_line_changed.connect(self._on_trade_line_dragged)
         self._review_panel.snapshot_to_chart.connect(self._show_snapshot_in_chart)
+        self._review_panel.retrain_requested.connect(self._on_retrain_from_mistake)
         self._btn_download.clicked.connect(self._on_download)
         self._btn_start.clicked.connect(self._on_start_session)
         self._btn_finish.clicked.connect(self._on_finish_session)
@@ -881,6 +905,7 @@ class MainWindow(QMainWindow):
                 symbol, tf,
                 self._spn_visible.value(), self._spn_future.value(),
                 scenario_tag=plan["scenario_tag"],
+                difficulty=plan["difficulty"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "数据不足", str(exc))
@@ -894,6 +919,7 @@ class MainWindow(QMainWindow):
         self._session.plan_direction = plan["plan_direction"]
         self._session.plan_invalidation = plan["plan_invalidation"]
         self._session.difficulty = plan["difficulty"]
+        self._session.training_goal = plan.get("training_goal", "")
         self._session.start()
 
         self._planned_risk_pct = plan["risk_pct"]
@@ -906,6 +932,7 @@ class MainWindow(QMainWindow):
                 initial_capital=persisted_capital,
                 bankruptcy_count=persisted_bankruptcy,
                 rules=self._rules,
+                planned_risk_pct=plan["risk_pct"],
             )
         else:
             self._trade_mode = None
@@ -1259,13 +1286,56 @@ class MainWindow(QMainWindow):
         self._spn_qty.setValue(qty)
         return qty
 
+    def _check_and_record_violations(self, qty: int, entry_price: float, sl: Optional[float]) -> bool:
+        """Check discipline before opening. Returns False if user cancels."""
+        if not self._trade_mode:
+            return True
+        violations = self._trade_mode.check_open_discipline(qty, entry_price, sl)
+        if not violations:
+            return True
+
+        critical = [v for v in violations if v["severity"] == "critical"]
+        warnings = [v for v in violations if v["severity"] == "warning"]
+
+        if critical:
+            msg = "风控纪律违规:\n\n"
+            for v in critical:
+                msg += f"  [严重] {v['details']}\n"
+            for v in warnings:
+                msg += f"  [警告] {v['details']}\n"
+            msg += "\n建议设置止损后再下单。仍要继续？"
+            ans = QMessageBox.warning(
+                self, "风控纪律", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return False
+
+        elif warnings:
+            msg = "风控提醒:\n\n"
+            for v in warnings:
+                msg += f"  {v['details']}\n"
+            msg += "\n仍要继续？"
+            ans = QMessageBox.question(self, "风控提醒", msg)
+            if ans != QMessageBox.StandardButton.Yes:
+                return False
+
+        self._session.violations.extend(violations)
+        return True
+
     def _on_buy(self):
         if not self._trade_mode or self._session.state != SessionState.RUNNING:
             return
         qty = self._resolve_quantity()
         if not qty:
             return
-        pos = self._trade_mode.open_long(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
+        candle = self._session.current_candle
+        entry_price = candle.close if candle else 0
+        sl = self._spn_sl.value() or None
+        if not self._check_and_record_violations(qty, entry_price, sl):
+            return
+        pos = self._trade_mode.open_long(qty, sl, self._spn_tp.value() or None)
         if pos:
             self._show_trade_lines()
             self._update_position_display()
@@ -1276,7 +1346,12 @@ class MainWindow(QMainWindow):
         qty = self._resolve_quantity()
         if not qty:
             return
-        pos = self._trade_mode.open_short(qty, self._spn_sl.value() or None, self._spn_tp.value() or None)
+        candle = self._session.current_candle
+        entry_price = candle.close if candle else 0
+        sl = self._spn_sl.value() or None
+        if not self._check_and_record_violations(qty, entry_price, sl):
+            return
+        pos = self._trade_mode.open_short(qty, sl, self._spn_tp.value() or None)
         if pos:
             self._show_trade_lines()
             self._update_position_display()
@@ -1451,10 +1526,12 @@ class MainWindow(QMainWindow):
         if pos is None:
             return
         if line_id == "sl_line":
+            old_sl = pos.stop_loss
             pos.update_stop_loss(new_price)
             self._spn_sl.blockSignals(True)
             self._spn_sl.setValue(new_price)
             self._spn_sl.blockSignals(False)
+            self._check_sl_movement(old_sl, new_price)
         elif line_id == "tp_line":
             pos.update_take_profit(new_price)
             self._spn_tp.blockSignals(True)
@@ -1462,13 +1539,23 @@ class MainWindow(QMainWindow):
             self._spn_tp.blockSignals(False)
         self._update_position_display()
 
+    def _check_sl_movement(self, old_sl: Optional[float], new_sl: float):
+        if not self._trade_mode or not old_sl:
+            return
+        violation = self._trade_mode.check_stop_loss_moved(old_sl, new_sl)
+        if violation:
+            self._session.violations.append(violation)
+            self._lbl_status.setText(f"⚠ 风控提醒: {violation['details']}")
+
     def _on_sl_spinbox_changed(self, value: float):
         pos = self._session.position
         if pos is None:
             return
+        old_sl = pos.stop_loss
         pos.update_stop_loss(value if value > 0 else None)
         if value > 0:
             self._chart.add_trade_line("sl_line", value, "stop_loss", "#ef5350")
+            self._check_sl_movement(old_sl, value)
         else:
             self._chart.remove_trade_line("sl_line")
         self._update_position_display()
@@ -1653,6 +1740,12 @@ class MainWindow(QMainWindow):
                 self._trade_mode.equity_snapshots,
             )
 
+        if self._session.violations:
+            self._stats_service.save_violations(
+                self._session.session_id,
+                self._session.violations,
+            )
+
         self._persist_drawings(drawings)
         self._persist_mistake_book(drawings)
         self._chart.remove_all_trade_lines()
@@ -1660,8 +1753,13 @@ class MainWindow(QMainWindow):
         self._update_live_stats()
         self._pending_review_trades.clear()
         self._btn_write_review.setEnabled(False)
+
+        violation_count = len(self._session.violations)
+        end_msg = "训练记录已保存。\n切换到 [复盘] 查看统计、错误分类和 PA 标注。"
+        if violation_count > 0:
+            end_msg += f"\n\n本轮共 {violation_count} 次风控纪律违规，请在复盘面板查看详情。"
         self._lbl_status.setText("训练已保存")
-        QMessageBox.information(self, "训练结束", "训练记录已保存。\n切换到 [复盘] 查看统计、错误分类和 PA 标注。")
+        QMessageBox.information(self, "训练结束", end_msg)
 
     def _compute_session_score(self, drawings: list) -> int:
         if self._trade_mode:
@@ -1734,6 +1832,93 @@ class MainWindow(QMainWindow):
                 )
 
     # ------------------------------------------------------------------
+    # Retrain from mistake
+    # ------------------------------------------------------------------
+
+    def _on_retrain_from_mistake(self, mistake_id: int):
+        mistake = self._stats_service.get_mistake_for_retrain(mistake_id)
+        if not mistake:
+            QMessageBox.warning(self, "错误", "找不到该错题记录")
+            return
+
+        symbol_code = mistake.get("symbol", "")
+        tf_label = mistake.get("timeframe", "")
+        slice_start = mistake.get("slice_start", 0)
+        slice_end = mistake.get("slice_end", 0)
+
+        if not symbol_code or not tf_label or slice_start >= slice_end:
+            QMessageBox.warning(self, "错误", "该错题缺少有效的切片信息，无法复训")
+            return
+
+        symbol = Symbol(code=symbol_code, name=symbol_code, market_type=MarketType.A_SHARE)
+        try:
+            tf = Timeframe.from_label(tf_label)
+        except ValueError:
+            QMessageBox.warning(self, "错误", f"无法识别周期: {tf_label}")
+            return
+
+        if not self._cache.has_data(symbol, tf):
+            QMessageBox.warning(self, "数据不足", f"缓存中没有 {symbol_code} {tf_label} 的数据")
+            return
+
+        category = mistake.get("category", "trade")
+        mode = TrainingMode.TRADE if category == "trade" else TrainingMode.PREDICT
+
+        try:
+            visible, future = self._engine.load_mistake_slice(
+                symbol, tf, slice_start, slice_end,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "数据不足", str(exc))
+            return
+
+        self._session = ReplaySession()
+        self._session.setup(symbol, tf, mode, visible, future)
+        self._session.setup_type = mistake.get("setup_type", "")
+        self._session.plan_notes = f"错题复训: {mistake.get('description', '')}"
+        self._session.start()
+
+        self._planned_risk_pct = 1.0
+        self._spn_risk_pct.setValue(1.0)
+        if mode == TrainingMode.TRADE:
+            persisted_capital = self._stats_service.get_last_equity()
+            persisted_bankruptcy = self._stats_service.get_bankruptcy_count()
+            self._trade_mode = TradeMode(
+                self._session,
+                initial_capital=persisted_capital,
+                bankruptcy_count=persisted_bankruptcy,
+                rules=self._rules,
+                planned_risk_pct=1.0,
+            )
+        else:
+            self._trade_mode = None
+        self._predict_mode = PredictMode(self._session) if mode == TrainingMode.PREDICT else None
+        self._pending_review_trades.clear()
+        self._btn_write_review.setEnabled(False)
+
+        self._btn_sell.setEnabled(self._rules.allows_short())
+        self._btn_limit_sell.setEnabled(self._rules.allows_short())
+        self._pending_limit = None
+        self._chart.set_timeframe(tf)
+        self._chart.set_candles(visible)
+        self._chart.set_ma_data(visible)
+        self._chart.clear_drawings()
+        self._chart.remove_all_trade_lines()
+        self._refresh_markers()
+        self._update_bar_label()
+        self._update_live_stats()
+        self._update_position_display()
+        self._update_plan_label()
+
+        self._stats_service.mark_mistake_retrained(mistake_id)
+
+        self._inp_symbol.setText(symbol_code)
+        self._lbl_status.setText(
+            f"错题复训: {symbol_code} {tf_label} | "
+            f"可见{len(visible)} + 未来{len(future)}"
+        )
+
+    # ------------------------------------------------------------------
     # Data
     # ------------------------------------------------------------------
 
@@ -1772,11 +1957,13 @@ class MainWindow(QMainWindow):
 
     def _update_plan_label(self):
         direction_map = {"long": "看多", "short": "看空", "sideways": "震荡", "": "未设定"}
+        goal_text = f"\n目标: {self._session.training_goal}" if self._session.training_goal else ""
         self._lbl_plan.setText(
             f"Setup: {self._session.setup_type or '-'}\n"
             f"场景: {self._session.scenario_tag or '随机'}\n"
             f"方向: {direction_map.get(self._session.plan_direction, '未设定')}\n"
             f"失效: {self._session.plan_invalidation or '-'}\n"
+            f"难度: {self._session.difficulty}{goal_text}\n"
             f"备注: {self._session.plan_notes or '-'}"
         )
 

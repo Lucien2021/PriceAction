@@ -124,9 +124,19 @@ class SnapshotViewer(QDialog):
         super().resizeEvent(event)
 
 
+MISTAKE_CATEGORIES = [
+    ("结构误判", "对趋势、支撑阻力、形态识别判断错误"),
+    ("入场过早/过晚", "未等确认信号或错过最佳入场位"),
+    ("止损位置错误", "止损太近被扫或太远导致亏损过大"),
+    ("仓位与风险不匹配", "下单数量与计划风险百分比不一致"),
+    ("计划外执行", "未按训练前计划操作，冲动交易"),
+]
+
+
 class ReviewPanel(QWidget):
     session_selected = Signal(str)
     snapshot_to_chart = Signal(str)
+    retrain_requested = Signal(int)
 
     def __init__(self, stats_service: StatsService, parent=None):
         super().__init__(parent)
@@ -144,6 +154,7 @@ class ReviewPanel(QWidget):
         self._tabs.addTab(self._build_journal_tab(), "交易日志")
         self._tabs.addTab(self._build_sessions_tab(), "训练记录")
         self._tabs.addTab(self._build_mistakes_tab(), "错题本")
+        self._tabs.addTab(self._build_diagnostic_tab(), "能力诊断")
         layout.addWidget(self._tabs)
 
     def set_ui_font_points(self, pt: int) -> None:
@@ -386,19 +397,290 @@ class ReviewPanel(QWidget):
         layout.addLayout(top)
 
         self._mistake_table = QTableWidget()
-        self._mistake_table.setColumnCount(7)
+        self._mistake_table.setColumnCount(8)
         self._mistake_table.setHorizontalHeaderLabels([
-            "时间", "品种", "周期", "类别", "Setup", "错误分类", "描述",
+            "时间", "品种", "周期", "类别", "Setup", "错误分类", "描述", "已复训",
         ])
         self._mistake_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._mistake_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._mistake_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         layout.addWidget(self._mistake_table)
 
+        self._mistake_repeat_info = QGroupBox("错误复发统计")
+        repeat_lay = QVBoxLayout(self._mistake_repeat_info)
+        self._lbl_repeat_stats = QTextBrowser()
+        self._lbl_repeat_stats.setMinimumHeight(100)
+        repeat_lay.addWidget(self._lbl_repeat_stats)
+        layout.addWidget(self._mistake_repeat_info)
+
+        btn_row = QHBoxLayout()
         btn_done = QPushButton("标记为已复训")
         btn_done.clicked.connect(self._on_mark_retrained)
-        layout.addWidget(btn_done)
+        btn_row.addWidget(btn_done)
+
+        btn_retrain = QPushButton("一键复训此错题")
+        btn_retrain.setStyleSheet("background:#5b5bff;color:white;font-weight:bold;")
+        btn_retrain.setMinimumHeight(32)
+        btn_retrain.clicked.connect(self._on_retrain_mistake)
+        btn_row.addWidget(btn_retrain)
+        layout.addLayout(btn_row)
         return widget
+
+    # ------------------------------------------------------------------
+    # Diagnostic tab
+    # ------------------------------------------------------------------
+
+    def _build_diagnostic_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(8)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self._diag_setup_group = QGroupBox("各 Setup 能力统计")
+        ds_lay = QVBoxLayout(self._diag_setup_group)
+        self._diag_setup_table = QTableWidget()
+        self._diag_setup_table.setColumnCount(7)
+        self._diag_setup_table.setHorizontalHeaderLabels([
+            "Setup", "交易数", "胜率", "平均R", "执行分", "净盈亏", "评级",
+        ])
+        self._diag_setup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._diag_setup_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._diag_setup_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        ds_lay.addWidget(self._diag_setup_table)
+        layout.addWidget(self._diag_setup_group)
+
+        self._diag_mistake_group = QGroupBox("错误标签对净值拖累")
+        dm_lay = QVBoxLayout(self._diag_mistake_group)
+        self._diag_mistake_table = QTableWidget()
+        self._diag_mistake_table.setColumnCount(3)
+        self._diag_mistake_table.setHorizontalHeaderLabels(["错误类型", "累计盈亏影响", "严重程度"])
+        self._diag_mistake_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._diag_mistake_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        dm_lay.addWidget(self._diag_mistake_table)
+        layout.addWidget(self._diag_mistake_group)
+
+        self._diag_violations_group = QGroupBox("风控纪律违规")
+        dv_lay = QVBoxLayout(self._diag_violations_group)
+        self._lbl_violations = QTextBrowser()
+        self._lbl_violations.setMinimumHeight(80)
+        dv_lay.addWidget(self._lbl_violations)
+        layout.addWidget(self._diag_violations_group)
+
+        self._diag_progress_group = QGroupBox("能力进步曲线 (近20笔滚动)")
+        dp_lay = QVBoxLayout(self._diag_progress_group)
+        self._lbl_progress = QTextBrowser()
+        self._lbl_progress.setMinimumHeight(120)
+        dp_lay.addWidget(self._lbl_progress)
+        layout.addWidget(self._diag_progress_group)
+
+        self._diag_report_group = QGroupBox("阶段报告")
+        dr_lay = QVBoxLayout(self._diag_report_group)
+        self._lbl_stage_report = QTextBrowser()
+        self._lbl_stage_report.setMinimumHeight(200)
+        dr_lay.addWidget(self._lbl_stage_report)
+        layout.addWidget(self._diag_report_group)
+
+        btn_row = QHBoxLayout()
+        btn_refresh_diag = QPushButton("刷新诊断")
+        btn_refresh_diag.clicked.connect(self._update_diagnostic)
+        btn_row.addWidget(btn_refresh_diag)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        layout.addStretch()
+        return widget
+
+    def _update_diagnostic(self):
+        sym = self._filter_symbol.currentData() or None
+        tf = self._filter_tf.currentData() or None
+
+        cap = self._stats.get_capability_stats(symbol=sym, timeframe=tf)
+        self._fill_setup_table(cap.get("setup_stats", {}))
+        self._fill_mistake_impact_table(cap.get("mistake_pnl_impact", {}))
+        self._fill_violations_display(cap.get("violation_stats", {}), cap.get("risk_compliance_rate", 0))
+        self._fill_progress_display(sym, tf)
+        self._fill_stage_report(sym, tf)
+
+    def _fill_setup_table(self, setup_stats: dict):
+        self._diag_setup_table.setRowCount(0)
+        for setup, stats in sorted(setup_stats.items(), key=lambda x: -x[1]["total"]):
+            row = self._diag_setup_table.rowCount()
+            self._diag_setup_table.insertRow(row)
+
+            wr = stats["win_rate"]
+            avg_r_str = f"{stats['avg_r']:.2f}" if stats.get("avg_r") is not None else "-"
+            exec_str = f"{stats['avg_execution_score']:.0f}" if stats.get("avg_execution_score") else "-"
+            net = stats.get("net_pnl", 0)
+
+            rating = "--"
+            if stats["total"] >= 5:
+                if wr >= 0.6 and (stats.get("avg_r") or 0) > 0:
+                    rating = "优势"
+                elif wr >= 0.45:
+                    rating = "一般"
+                else:
+                    rating = "薄弱"
+            elif stats["total"] >= 3:
+                rating = "样本少"
+
+            vals = [
+                setup, str(stats["total"]), f"{wr:.0%}",
+                avg_r_str, exec_str, f"{net:+.2f}", rating,
+            ]
+            for col, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if col == 6:
+                    if rating == "优势":
+                        item.setForeground(Qt.GlobalColor.green)
+                    elif rating == "薄弱":
+                        item.setForeground(Qt.GlobalColor.red)
+                if col == 5:
+                    item.setForeground(
+                        Qt.GlobalColor.red if net > 0
+                        else Qt.GlobalColor.green if net < 0
+                        else Qt.GlobalColor.gray
+                    )
+                self._diag_setup_table.setItem(row, col, item)
+
+    def _fill_mistake_impact_table(self, mistake_impact: dict):
+        self._diag_mistake_table.setRowCount(0)
+        for tag, pnl in mistake_impact.items():
+            row = self._diag_mistake_table.rowCount()
+            self._diag_mistake_table.insertRow(row)
+            severity = "严重" if pnl < -1000 else "中等" if pnl < 0 else "轻微"
+            vals = [tag, f"{pnl:+.2f}", severity]
+            for col, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if col == 1:
+                    item.setForeground(
+                        Qt.GlobalColor.red if pnl > 0
+                        else Qt.GlobalColor.green if pnl < 0
+                        else Qt.GlobalColor.gray
+                    )
+                if col == 2 and severity == "严重":
+                    item.setForeground(Qt.GlobalColor.red)
+                self._diag_mistake_table.setItem(row, col, item)
+
+    def _fill_violations_display(self, violation_stats: dict, compliance: float):
+        lines: list[str] = []
+        total = violation_stats.get("total", 0)
+        lines.append(f"总违规次数: {total}")
+        lines.append(f"止损合规率: {compliance:.0%}")
+
+        by_type = violation_stats.get("by_type", [])
+        if by_type:
+            lines.append("\n违规类型分布:")
+            type_labels = {
+                "no_stop_loss": "未设止损下单",
+                "oversized_position": "仓位超风险",
+                "stop_loss_widened": "止损后移(风险扩大)",
+            }
+            for item in by_type:
+                label = type_labels.get(item["violation_type"], item["violation_type"])
+                lines.append(f"  {label}: {item['cnt']}次")
+
+        self._lbl_violations.setPlainText("\n".join(lines))
+
+    def _fill_progress_display(self, sym, tf):
+        curves = self._stats.get_progress_curves(symbol=sym, timeframe=tf, window=20)
+        if not curves:
+            self._lbl_progress.setPlainText("暂无足够数据生成进步曲线")
+            return
+
+        latest = curves[-1]
+        lines = [
+            f"样本量: {len(curves)} 笔交易",
+            f"",
+            f"当前滚动指标 (近20笔):",
+            f"  胜率: {latest['rolling_win_rate']:.0%}",
+            f"  执行分: {latest['rolling_exec_score']:.0f}",
+            f"  止损合规率: {latest['rolling_risk_compliance']:.0%}",
+            f"  错误率: {latest['rolling_mistake_rate']:.0%}",
+        ]
+
+        if len(curves) >= 40:
+            mid = curves[len(curves) // 2]
+            early = curves[min(19, len(curves) - 1)]
+            lines.append("")
+            lines.append("变化趋势:")
+
+            def _trend(current, past, label):
+                delta = current - past
+                arrow = "↑" if delta > 0.02 else "↓" if delta < -0.02 else "→"
+                return f"  {label}: {arrow} ({delta:+.0%})"
+
+            lines.append(_trend(latest["rolling_win_rate"], early["rolling_win_rate"], "胜率"))
+            lines.append(_trend(latest["rolling_exec_score"] / 100, early["rolling_exec_score"] / 100, "执行分"))
+            lines.append(_trend(latest["rolling_risk_compliance"], early["rolling_risk_compliance"], "止损合规"))
+            inv_mistake = 1 - latest["rolling_mistake_rate"]
+            inv_early = 1 - early["rolling_mistake_rate"]
+            lines.append(_trend(inv_mistake, inv_early, "无错误率"))
+
+        self._lbl_progress.setPlainText("\n".join(lines))
+
+    def _fill_stage_report(self, sym, tf):
+        report = self._stats.get_stage_report(symbol=sym, timeframe=tf)
+        overall = report["overall"]
+        recent_20 = report["recent_20"]
+
+        lines: list[str] = []
+
+        lines.append("=" * 40)
+        lines.append("阶段诊断报告")
+        lines.append("=" * 40)
+
+        lines.append(f"\n总样本: {overall['sample_size']} 笔  |  近20笔样本: {recent_20['sample_size']} 笔")
+
+        if report.get("best_setup"):
+            name, stats = report["best_setup"]
+            lines.append(f"\n最佳 Setup: {name} (胜率 {stats['win_rate']:.0%}, {stats['total']}笔)")
+        if report.get("worst_setup"):
+            name, stats = report["worst_setup"]
+            lines.append(f"最弱 Setup: {name} (胜率 {stats['win_rate']:.0%}, {stats['total']}笔)")
+
+        if report.get("top_mistake_drag"):
+            tag, pnl = report["top_mistake_drag"]
+            lines.append(f"\n最大净值拖累: 「{tag}」 累计 {pnl:+.2f}")
+
+        lines.append(f"\n风控稳定性:")
+        lines.append(f"  止损合规率: {overall.get('risk_compliance_rate', 0):.0%}")
+        lines.append(f"  平均执行评分: {overall.get('avg_execution_score', 0):.0f}")
+        vs = overall.get("violation_stats", {})
+        lines.append(f"  总违规次数: {vs.get('total', 0)}")
+
+        lines.append(f"\n近20笔 vs 全局:")
+        o_wr = sum(
+            s["wins"] for s in overall.get("setup_stats", {}).values()
+        ) / max(sum(s["total"] for s in overall.get("setup_stats", {}).values()), 1)
+        r_wr = sum(
+            s["wins"] for s in recent_20.get("setup_stats", {}).values()
+        ) / max(sum(s["total"] for s in recent_20.get("setup_stats", {}).values()), 1)
+        lines.append(f"  胜率: {r_wr:.0%} (全局 {o_wr:.0%})")
+        lines.append(f"  执行分: {recent_20.get('avg_execution_score', 0):.0f} (全局 {overall.get('avg_execution_score', 0):.0f})")
+        lines.append(f"  止损合规: {recent_20.get('risk_compliance_rate', 0):.0%} (全局 {overall.get('risk_compliance_rate', 0):.0%})")
+
+        lines.append(f"\n下一阶段建议:")
+        suggestions: list[str] = []
+
+        if overall.get("risk_compliance_rate", 1) < 0.8:
+            suggestions.append("优先提高止损合规率 - 每笔交易必须设置止损")
+        if report.get("top_mistake_drag") and report["top_mistake_drag"][1] < -500:
+            tag = report["top_mistake_drag"][0]
+            suggestions.append(f"针对「{tag}」做专项训练 - 这是你最大的净值拖累")
+        if report.get("worst_setup"):
+            name, stats = report["worst_setup"]
+            if stats["total"] >= 5 and stats["win_rate"] < 0.35:
+                suggestions.append(f"暂时减少「{name}」交易 - 胜率过低，需要更多学习")
+        if overall.get("avg_execution_score", 100) < 60:
+            suggestions.append("提升执行评分 - 认真对待每笔交易的入场理由和出场复盘")
+
+        if not suggestions:
+            suggestions.append("整体表现良好，继续保持并增加训练频率")
+
+        for i, s in enumerate(suggestions, 1):
+            lines.append(f"  {i}. {s}")
+
+        self._lbl_stage_report.setPlainText("\n".join(lines))
 
     # ------------------------------------------------------------------
     # Refresh
@@ -416,6 +698,7 @@ class ReviewPanel(QWidget):
         self._update_sessions(sym, tf)
         self._update_suggestions(sym, tf)
         self._update_mistakes()
+        self._update_diagnostic()
 
     def _refresh_filters(self):
         self._refill(self._filter_symbol, "全部", self._stats.get_distinct_session_values("symbol"))
@@ -777,14 +1060,70 @@ class ReviewPanel(QWidget):
         for i, m in enumerate(mistakes):
             self._mistake_id_map[i] = m["id"]
             tags = ", ".join(json.loads(m.get("mistake_tags", "[]") or "[]"))
+            retrained_text = "是" if m.get("retrained") else ""
             vals = [
                 (m.get("created_at") or "")[:19],
                 m.get("symbol", ""), m.get("timeframe", ""),
                 m.get("category", ""), m.get("setup_type", ""),
-                tags, m.get("description", ""),
+                tags, m.get("description", ""), retrained_text,
             ]
             for col, v in enumerate(vals):
-                self._mistake_table.setItem(i, col, QTableWidgetItem(v))
+                item = QTableWidgetItem(v)
+                if col == 7 and retrained_text:
+                    item.setForeground(Qt.GlobalColor.green)
+                self._mistake_table.setItem(i, col, item)
+
+        self._update_repeat_stats(mistakes)
+
+    def _update_repeat_stats(self, mistakes: list):
+        tag_counter: dict[str, int] = {}
+        setup_tag_counter: dict[str, dict[str, int]] = {}
+        retrained_still_recur: list[str] = []
+
+        retrained_tags: set[str] = set()
+        for m in mistakes:
+            tags = json.loads(m.get("mistake_tags", "[]") or "[]")
+            setup = m.get("setup_type", "未分类")
+            if m.get("retrained"):
+                retrained_tags.update(tags)
+            for tag in tags:
+                tag_counter[tag] = tag_counter.get(tag, 0) + 1
+                setup_tag_counter.setdefault(setup, {})
+                setup_tag_counter[setup][tag] = setup_tag_counter[setup].get(tag, 0) + 1
+
+        for tag in retrained_tags:
+            not_retrained_count = sum(
+                1 for m in mistakes
+                if not m.get("retrained")
+                and tag in json.loads(m.get("mistake_tags", "[]") or "[]")
+            )
+            if not_retrained_count > 0:
+                retrained_still_recur.append(f"{tag} (复训后仍出现{not_retrained_count}次)")
+
+        lines: list[str] = []
+        if tag_counter:
+            sorted_tags = sorted(tag_counter.items(), key=lambda x: -x[1])[:5]
+            lines.append("最常见错误:")
+            for tag, cnt in sorted_tags:
+                lines.append(f"  {tag}: {cnt}次")
+
+        if setup_tag_counter:
+            lines.append("\n各 Setup 易发错误:")
+            for setup, tags in sorted(setup_tag_counter.items()):
+                top = max(tags, key=tags.get)
+                lines.append(f"  {setup}: {top} ({tags[top]}次)")
+
+        if retrained_still_recur:
+            lines.append("\n已复训但仍复发:")
+            for item in retrained_still_recur[:3]:
+                lines.append(f"  {item}")
+
+        total = len(mistakes)
+        retrained_count = sum(1 for m in mistakes if m.get("retrained"))
+        if total > 0:
+            lines.append(f"\n复训率: {retrained_count}/{total} ({retrained_count/total:.0%})")
+
+        self._lbl_repeat_stats.setPlainText("\n".join(lines) if lines else "暂无错题统计")
 
     def _on_mark_retrained(self):
         row = self._mistake_table.currentRow()
@@ -794,3 +1133,11 @@ class ReviewPanel(QWidget):
         self._stats.mark_mistake_retrained(self._mistake_id_map[row])
         self._update_mistakes()
         QMessageBox.information(self, "已标记", "该错题已标记为完成复训")
+
+    def _on_retrain_mistake(self):
+        row = self._mistake_table.currentRow()
+        if row < 0 or row not in self._mistake_id_map:
+            QMessageBox.information(self, "提示", "请先选择一条错题记录")
+            return
+        mistake_id = self._mistake_id_map[row]
+        self.retrain_requested.emit(mistake_id)

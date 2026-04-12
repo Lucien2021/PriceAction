@@ -49,8 +49,8 @@ class StatsService:
         self._conn.execute(
             "INSERT OR REPLACE INTO sessions "
             "(id, symbol, timeframe, mode, started_at, finished_at, visible_bars, future_bars, "
-            " setup_type, scenario_tag, plan_notes, plan_direction, plan_invalidation, difficulty, score) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " setup_type, scenario_tag, plan_notes, plan_direction, plan_invalidation, difficulty, score, training_goal) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.session_id,
                 session.symbol.code if session.symbol else "",
@@ -67,6 +67,7 @@ class StatsService:
                 session.plan_invalidation,
                 session.difficulty,
                 session.score,
+                session.training_goal,
             ),
         )
 
@@ -331,6 +332,233 @@ class StatsService:
     def mark_mistake_retrained(self, mistake_id: int) -> None:
         self._conn.execute("UPDATE mistake_book SET retrained=1 WHERE id=?", (mistake_id,))
         self._conn.commit()
+
+    def save_violations(self, session_id: str, violations: List[Dict[str, Any]]) -> None:
+        for v in violations:
+            self._conn.execute(
+                "INSERT INTO discipline_violations "
+                "(session_id, created_at, violation_type, severity, details, bar_index) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    session_id,
+                    datetime.now().isoformat(),
+                    v.get("type", ""),
+                    v.get("severity", "warning"),
+                    v.get("details", ""),
+                    v.get("bar_index", 0),
+                ),
+            )
+        self._conn.commit()
+
+    def get_violations(
+        self,
+        session_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if session_id:
+            rows = self._conn.execute(
+                "SELECT * FROM discipline_violations WHERE session_id=? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        else:
+            parts: List[str] = []
+            params: list = []
+            if symbol:
+                parts.append("s.symbol=?")
+                params.append(symbol)
+            if timeframe:
+                parts.append("s.timeframe=?")
+                params.append(timeframe)
+            where = ("WHERE " + " AND ".join(parts)) if parts else ""
+            rows = self._conn.execute(
+                f"SELECT v.* FROM discipline_violations v "
+                f"JOIN sessions s ON v.session_id=s.id {where} ORDER BY v.id DESC",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_violation_stats(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        rows = self._conn.execute(
+            f"SELECT v.violation_type, COUNT(*) AS cnt "
+            f"FROM discipline_violations v JOIN sessions s ON v.session_id=s.id "
+            f"{where_clause} GROUP BY v.violation_type ORDER BY cnt DESC",
+            params,
+        ).fetchall()
+        total = sum(r["cnt"] for r in rows)
+        return {
+            "total": total,
+            "by_type": [dict(r) for r in rows],
+        }
+
+    def get_mistake_for_retrain(self, mistake_id: int) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT * FROM mistake_book WHERE id=?", (mistake_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Capability diagnostics
+    # ------------------------------------------------------------------
+
+    def get_capability_stats(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        recent_n: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+
+        limit_sql = f"LIMIT {recent_n}" if recent_n else ""
+        trade_rows = self._conn.execute(
+            f"SELECT t.*, s.setup_type, s.scenario_tag, s.training_goal "
+            f"FROM trades t JOIN sessions s ON t.session_id=s.id "
+            f"{where_clause} ORDER BY t.id DESC {limit_sql}",
+            params,
+        ).fetchall()
+        trades = [dict(r) for r in trade_rows]
+
+        setup_map: Dict[str, list] = {}
+        scenario_map: Dict[str, list] = {}
+        for t in trades:
+            setup = t.get("setup_type") or "未分类"
+            scenario = t.get("scenario_tag") or "随机"
+            setup_map.setdefault(setup, []).append(t)
+            scenario_map.setdefault(scenario, []).append(t)
+
+        def _group_stats(group: list) -> dict:
+            total = len(group)
+            wins = sum(1 for t in group if (t["pnl"] or 0) > 0)
+            losses = sum(1 for t in group if (t["pnl"] or 0) < 0)
+            wr = wins / max(wins + losses, 1)
+            rs = [t["r_multiple"] for t in group if t.get("r_multiple") is not None]
+            avg_r = sum(rs) / len(rs) if rs else None
+            es = [t["execution_score"] for t in group if t.get("execution_score")]
+            avg_exec = sum(es) / len(es) if es else None
+            net = sum(t["pnl"] or 0 for t in group)
+            return {
+                "total": total, "wins": wins, "losses": losses,
+                "win_rate": wr, "avg_r": avg_r,
+                "avg_execution_score": avg_exec, "net_pnl": net,
+            }
+
+        setup_stats = {k: _group_stats(v) for k, v in setup_map.items()}
+        scenario_stats = {k: _group_stats(v) for k, v in scenario_map.items()}
+
+        mistake_impact: Dict[str, float] = {}
+        for t in trades:
+            mtags = json.loads(t.get("mistake_tags") or "[]")
+            pnl = t.get("pnl") or 0
+            for tag in mtags:
+                mistake_impact[tag] = mistake_impact.get(tag, 0.0) + pnl
+
+        violation_stats = self.get_violation_stats(symbol=symbol, timeframe=timeframe)
+
+        with_sl = sum(1 for t in trades if t.get("stop_loss") is not None and t["stop_loss"] > 0)
+        risk_compliance = with_sl / len(trades) if trades else 1.0
+
+        exec_scores = [t["execution_score"] for t in trades if t.get("execution_score")]
+        avg_consistency = sum(exec_scores) / len(exec_scores) if exec_scores else 0
+
+        return {
+            "sample_size": len(trades),
+            "setup_stats": setup_stats,
+            "scenario_stats": scenario_stats,
+            "mistake_pnl_impact": dict(sorted(mistake_impact.items(), key=lambda x: x[1])),
+            "violation_stats": violation_stats,
+            "risk_compliance_rate": risk_compliance,
+            "avg_execution_score": avg_consistency,
+        }
+
+    def get_progress_curves(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        window: int = 20,
+    ) -> List[Dict[str, Any]]:
+        where_clause, params = self._build_session_filter(symbol=symbol, timeframe=timeframe)
+        rows = self._conn.execute(
+            f"SELECT t.id, t.exit_time, t.pnl, t.execution_score, t.stop_loss, "
+            f"       t.mistake_tags "
+            f"FROM trades t JOIN sessions s ON t.session_id=s.id "
+            f"{where_clause} ORDER BY t.id",
+            params,
+        ).fetchall()
+
+        result: List[Dict[str, Any]] = []
+        win_buf: List[int] = []
+        exec_buf: List[float] = []
+        sl_buf: List[int] = []
+        mistake_buf: List[int] = []
+
+        for row in rows:
+            pnl = row["pnl"] or 0
+            win_buf.append(1 if pnl > 0 else 0)
+            if len(win_buf) > window:
+                win_buf.pop(0)
+
+            es = row["execution_score"] or 0
+            if es > 0:
+                exec_buf.append(es)
+                if len(exec_buf) > window:
+                    exec_buf.pop(0)
+
+            sl_buf.append(1 if row["stop_loss"] else 0)
+            if len(sl_buf) > window:
+                sl_buf.pop(0)
+
+            has_mistake = 1 if json.loads(row["mistake_tags"] or "[]") else 0
+            mistake_buf.append(has_mistake)
+            if len(mistake_buf) > window:
+                mistake_buf.pop(0)
+
+            result.append({
+                "time": row["exit_time"],
+                "rolling_win_rate": sum(win_buf) / len(win_buf),
+                "rolling_exec_score": sum(exec_buf) / len(exec_buf) if exec_buf else 0,
+                "rolling_risk_compliance": sum(sl_buf) / len(sl_buf) if sl_buf else 0,
+                "rolling_mistake_rate": sum(mistake_buf) / len(mistake_buf) if mistake_buf else 0,
+            })
+        return result
+
+    def get_stage_report(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a stage report with recent vs overall comparisons."""
+        overall = self.get_capability_stats(symbol=symbol, timeframe=timeframe)
+        recent_20 = self.get_capability_stats(symbol=symbol, timeframe=timeframe, recent_n=20)
+        recent_50 = self.get_capability_stats(symbol=symbol, timeframe=timeframe, recent_n=50)
+
+        best_setup = None
+        worst_setup = None
+        if overall["setup_stats"]:
+            by_wr = sorted(overall["setup_stats"].items(), key=lambda x: -x[1]["win_rate"])
+            has_samples = [(k, v) for k, v in by_wr if v["total"] >= 3]
+            if has_samples:
+                best_setup = has_samples[0]
+                worst_setup = has_samples[-1]
+
+        top_mistake = None
+        if overall["mistake_pnl_impact"]:
+            items = list(overall["mistake_pnl_impact"].items())
+            if items:
+                top_mistake = items[0]
+
+        return {
+            "overall": overall,
+            "recent_20": recent_20,
+            "recent_50": recent_50,
+            "best_setup": best_setup,
+            "worst_setup": worst_setup,
+            "top_mistake_drag": top_mistake,
+        }
 
     # ------------------------------------------------------------------
     # Queries

@@ -51,6 +51,8 @@ class ReplaySession:
     plan_invalidation: str = ""
     difficulty: int = 0
     score: int = 0
+    training_goal: str = ""
+    violations: List[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------
 

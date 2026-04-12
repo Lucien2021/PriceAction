@@ -57,6 +57,7 @@ class TradeMode:
         rules: Optional[MarketRules] = None,
         slippage_pct: float = 0.0005,
         use_commission: bool = True,
+        planned_risk_pct: float = 1.0,
     ):
         self._session = session
         self._initial_capital = initial_capital
@@ -69,6 +70,8 @@ class TradeMode:
         self._use_commission = use_commission
         self._entry_commission = 0.0
         self._current_position_id = ""
+        self._planned_risk_pct = planned_risk_pct
+        self._last_stop_loss: Optional[float] = None
 
     @property
     def capital(self) -> float:
@@ -145,6 +148,68 @@ class TradeMode:
         if c is None:
             return False
         return self._can_sell_now(pos, c)
+
+    def set_planned_risk_pct(self, pct: float) -> None:
+        self._planned_risk_pct = pct
+
+    def check_open_discipline(
+        self,
+        quantity: int,
+        entry_price: float,
+        stop_loss: Optional[float],
+    ) -> List[dict]:
+        """Validate discipline before opening. Returns list of violation dicts."""
+        violations: List[dict] = []
+        bar_idx = self._session.absolute_bar_index
+
+        if stop_loss is None or stop_loss == 0:
+            violations.append({
+                "type": "no_stop_loss",
+                "severity": "critical",
+                "details": "未设置止损即下单",
+                "bar_index": bar_idx,
+            })
+            return violations
+
+        per_share_risk = abs(entry_price - stop_loss)
+        actual_risk = per_share_risk * quantity
+        planned_risk = self._capital * (self._planned_risk_pct / 100.0)
+
+        if planned_risk > 0 and actual_risk > planned_risk * 1.2:
+            ratio = actual_risk / planned_risk
+            violations.append({
+                "type": "oversized_position",
+                "severity": "warning",
+                "details": f"实际风险 {actual_risk:.0f} 是计划风险 {planned_risk:.0f} 的 {ratio:.1f}x",
+                "bar_index": bar_idx,
+            })
+
+        return violations
+
+    def check_stop_loss_moved(self, old_sl: Optional[float], new_sl: Optional[float]) -> Optional[dict]:
+        """Detect stop-loss moved further from entry (widening risk)."""
+        pos = self._session.position
+        if pos is None or old_sl is None or new_sl is None:
+            return None
+        if old_sl == new_sl:
+            return None
+        if pos.is_long:
+            if new_sl < old_sl:
+                return {
+                    "type": "stop_loss_widened",
+                    "severity": "warning",
+                    "details": f"止损从 {old_sl:.2f} 下移至 {new_sl:.2f}（风险扩大）",
+                    "bar_index": self._session.absolute_bar_index,
+                }
+        else:
+            if new_sl > old_sl:
+                return {
+                    "type": "stop_loss_widened",
+                    "severity": "warning",
+                    "details": f"止损从 {old_sl:.2f} 上移至 {new_sl:.2f}（风险扩大）",
+                    "bar_index": self._session.absolute_bar_index,
+                }
+        return None
 
     # ------------------------------------------------------------------
     # Open
