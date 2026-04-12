@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         self._btn_back_to_chart.clicked.connect(self._hide_snapshot_view)
         snap_top.addWidget(self._btn_back_to_chart)
         self._lbl_snap_title = QLabel("")
-        self._lbl_snap_title.setStyleSheet("color:#d1d4dc;font-size:13px;")
+        self._lbl_snap_title.setStyleSheet("color:#d1d4dc;font-size:16px;")
         snap_top.addWidget(self._lbl_snap_title)
         snap_top.addStretch()
         snap_layout.addLayout(snap_top)

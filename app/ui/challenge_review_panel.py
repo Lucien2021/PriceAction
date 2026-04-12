@@ -46,14 +46,14 @@ class ChallengeReviewPanel(QWidget):
 
         self._lbl_summary = QLabel("选择左侧挑战目标金额分组查看统计。")
         self._lbl_summary.setWordWrap(True)
-        self._lbl_summary.setStyleSheet("color:#333;font-size:13px;padding:4px 2px;")
+        self._lbl_summary.setStyleSheet("color:#333;font-size:15px;padding:4px 2px;")
         layout.addWidget(self._lbl_summary)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["挑战目标 (元)"])
         self._tree.setMinimumWidth(180)
-        self._tree.setFont(QFont(self._tree.font().family(), 12))
+        self._tree.setFont(QFont(self._tree.font().family(), 13))
         self._tree.currentItemChanged.connect(self._on_tree_changed)
         split.addWidget(self._tree)
 
@@ -63,7 +63,7 @@ class ChallengeReviewPanel(QWidget):
         self._table = QTableWidget()
         self._table.setColumnCount(len(self._HDR))
         self._table.setHorizontalHeaderLabels(self._HDR)
-        self._table.setFont(QFont(self._table.font().family(), 12))
+        self._table.setFont(QFont(self._table.font().family(), 13))
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
         self._table.setShowGrid(True)
@@ -74,7 +74,7 @@ class ChallengeReviewPanel(QWidget):
             "QTableWidget { gridline-color: #c8c8c8; }"
             "QHeaderView::section {"
             "  background-color: #e8e8e8;"
-            "  padding: 8px 10px;"
+            "  padding: 10px 12px;"
             "  border: 1px solid #c0c0c0;"
             "  font-weight: 600;"
             "  min-height: 32px;"

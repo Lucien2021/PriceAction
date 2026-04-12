@@ -34,10 +34,10 @@ _DOT_WIN = QColor("#26a69a")
 _DOT_LOSE = QColor("#ef5350")
 _DOT_HOVER = QColor("#5b5bff")
 
-_MARGIN_L = 70
+_MARGIN_L = 85
 _MARGIN_R = 20
-_MARGIN_T = 30
-_MARGIN_B = 40
+_MARGIN_T = 35
+_MARGIN_B = 50
 
 _MIN_PX_PER_POINT = 6
 _MAX_PX_PER_POINT = 120
@@ -123,7 +123,7 @@ class EquityCurveWidget(QWidget):
 
         if not self._data:
             p.setPen(QPen(_TEXT))
-            p.setFont(QFont("sans-serif", 12))
+            p.setFont(QFont("sans-serif", 14))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "暂无资金曲线数据")
             p.end()
             return
@@ -148,9 +148,9 @@ class EquityCurveWidget(QWidget):
                 if _MARGIN_L <= x <= w - _MARGIN_R:
                     p.setPen(QPen(_RESET_LINE, 1, Qt.PenStyle.DashLine))
                     p.drawLine(QPointF(x, _MARGIN_T), QPointF(x, _MARGIN_T + chart_h))
-                    p.setFont(QFont("sans-serif", 9))
+                    p.setFont(QFont("sans-serif", 12))
                     p.setPen(QPen(_RESET_LINE))
-                    p.drawText(QPointF(x + 2, _MARGIN_T + 12), "破产重置")
+                    p.drawText(QPointF(x + 2, _MARGIN_T + 14), "破产重置")
 
         if len(self._pts) > 1:
             for i in range(1, len(self._pts)):
@@ -185,7 +185,7 @@ class EquityCurveWidget(QWidget):
                 p.drawLine(QPointF(_MARGIN_L, pt.y()), QPointF(w - _MARGIN_R, pt.y()))
                 eq_val = self._data[self._hover_idx].get("equity_after", 0)
                 p.setPen(QPen(QColor("#d1d4dc")))
-                p.setFont(QFont("sans-serif", 9, QFont.Weight.Bold))
+                p.setFont(QFont("sans-serif", 12, QFont.Weight.Bold))
                 p.drawText(QPointF(4, pt.y() + 4), f"{eq_val:,.0f}")
 
         p.end()
@@ -197,7 +197,7 @@ class EquityCurveWidget(QWidget):
             val = eq_min + (eq_max - eq_min) * i / 4
             y = self._to_y(val, eq_min, eq_max)
             p.drawLine(QPointF(_MARGIN_L, y), QPointF(w - _MARGIN_R, y))
-            p.setFont(QFont("sans-serif", 9))
+            p.setFont(QFont("sans-serif", 12))
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(4, y + 4), f"{val:,.0f}")
             p.setPen(QPen(_GRID, 1))
@@ -207,7 +207,7 @@ class EquityCurveWidget(QWidget):
             visible_end = min(n - 1, int((self._offset_x + w) / self._px_per_pt) + 1)
             count_visible = visible_end - visible_start + 1
             step = max(1, count_visible // 8)
-            p.setFont(QFont("sans-serif", 8))
+            p.setFont(QFont("sans-serif", 11))
             for i in range(visible_start, visible_end + 1, step):
                 x = self._to_x(i)
                 if x < _MARGIN_L or x > w - _MARGIN_R:
@@ -342,7 +342,7 @@ class _TradeTooltip(QWidget):
         layout.setSpacing(4)
         self._lbl_info = QLabel()
         self._lbl_info.setWordWrap(True)
-        self._lbl_info.setStyleSheet("border:none;font-size:11px;line-height:1.5;")
+        self._lbl_info.setStyleSheet("border:none;font-size:14px;line-height:1.5;")
         layout.addWidget(self._lbl_info)
         self._lbl_snap = QLabel()
         self._lbl_snap.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -350,7 +350,7 @@ class _TradeTooltip(QWidget):
         self._lbl_snap.setFixedSize(260, 160)
         layout.addWidget(self._lbl_snap)
         self._lbl_hint = QLabel("点击查看大图")
-        self._lbl_hint.setStyleSheet("border:none;color:#808899;font-size:9px;")
+        self._lbl_hint.setStyleSheet("border:none;color:#808899;font-size:12px;")
         self._lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_hint)
 
