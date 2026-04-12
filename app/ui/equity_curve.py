@@ -62,6 +62,16 @@ class EquityCurveWidget(QWidget):
         self._dragging = False
         self._drag_start_x = 0.0
         self._drag_start_offset = 0.0
+        self._ui_font_pt = 13
+
+    def set_ui_font_points(self, pt: int) -> None:
+        self._ui_font_pt = max(10, min(24, int(pt)))
+        self.update()
+        if self._tooltip_widget is not None:
+            self._tooltip_widget.apply_ui_font_points(self._ui_font_pt)
+
+    def _spt(self, design_pt_at_ref13: float) -> int:
+        return max(7, round(design_pt_at_ref13 * self._ui_font_pt / 13))
 
     def set_data(self, points: List[dict]):
         self._data = points
@@ -123,7 +133,7 @@ class EquityCurveWidget(QWidget):
 
         if not self._data:
             p.setPen(QPen(_TEXT))
-            p.setFont(QFont("sans-serif", 14))
+            p.setFont(QFont("sans-serif", self._spt(14)))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "暂无资金曲线数据")
             p.end()
             return
@@ -148,7 +158,7 @@ class EquityCurveWidget(QWidget):
                 if _MARGIN_L <= x <= w - _MARGIN_R:
                     p.setPen(QPen(_RESET_LINE, 1, Qt.PenStyle.DashLine))
                     p.drawLine(QPointF(x, _MARGIN_T), QPointF(x, _MARGIN_T + chart_h))
-                    p.setFont(QFont("sans-serif", 12))
+                    p.setFont(QFont("sans-serif", self._spt(12)))
                     p.setPen(QPen(_RESET_LINE))
                     p.drawText(QPointF(x + 2, _MARGIN_T + 14), "破产重置")
 
@@ -185,7 +195,7 @@ class EquityCurveWidget(QWidget):
                 p.drawLine(QPointF(_MARGIN_L, pt.y()), QPointF(w - _MARGIN_R, pt.y()))
                 eq_val = self._data[self._hover_idx].get("equity_after", 0)
                 p.setPen(QPen(QColor("#d1d4dc")))
-                p.setFont(QFont("sans-serif", 12, QFont.Weight.Bold))
+                p.setFont(QFont("sans-serif", self._spt(12), QFont.Weight.Bold))
                 p.drawText(QPointF(4, pt.y() + 4), f"{eq_val:,.0f}")
 
         p.end()
@@ -197,7 +207,7 @@ class EquityCurveWidget(QWidget):
             val = eq_min + (eq_max - eq_min) * i / 4
             y = self._to_y(val, eq_min, eq_max)
             p.drawLine(QPointF(_MARGIN_L, y), QPointF(w - _MARGIN_R, y))
-            p.setFont(QFont("sans-serif", 12))
+            p.setFont(QFont("sans-serif", self._spt(12)))
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(4, y + 4), f"{val:,.0f}")
             p.setPen(QPen(_GRID, 1))
@@ -207,7 +217,7 @@ class EquityCurveWidget(QWidget):
             visible_end = min(n - 1, int((self._offset_x + w) / self._px_per_pt) + 1)
             count_visible = visible_end - visible_start + 1
             step = max(1, count_visible // 8)
-            p.setFont(QFont("sans-serif", 11))
+            p.setFont(QFont("sans-serif", self._spt(11)))
             for i in range(visible_start, visible_end + 1, step):
                 x = self._to_x(i)
                 if x < _MARGIN_L or x > w - _MARGIN_R:
@@ -311,6 +321,7 @@ class EquityCurveWidget(QWidget):
         data = self._data[idx]
         if self._tooltip_widget is None:
             self._tooltip_widget = _TradeTooltip()
+            self._tooltip_widget.apply_ui_font_points(self._ui_font_pt)
         self._tooltip_widget.set_data(data, idx)
         self._tooltip_widget.move(global_pos.x() + 16, global_pos.y() + 16)
         self._tooltip_widget.show()
@@ -353,6 +364,17 @@ class _TradeTooltip(QWidget):
         self._lbl_hint.setStyleSheet("border:none;color:#808899;font-size:12px;")
         self._lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_hint)
+
+    @staticmethod
+    def _px_for_ui(pt: int, design: float) -> int:
+        p = max(10, min(24, int(pt)))
+        return max(8, round(design * p / 13))
+
+    def apply_ui_font_points(self, pt: int) -> None:
+        info = self._px_for_ui(pt, 14)
+        hint = self._px_for_ui(pt, 12)
+        self._lbl_info.setStyleSheet(f"border:none;font-size:{info}px;line-height:1.5;")
+        self._lbl_hint.setStyleSheet(f"border:none;color:#808899;font-size:{hint}px;")
 
     def set_data(self, data: dict, idx: int = 0):
         d = "做多" if data.get("direction") == "long" else "做空"

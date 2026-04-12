@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent
+from PySide6.QtGui import QFont, QPixmap, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -145,6 +145,14 @@ class ReviewPanel(QWidget):
         self._tabs.addTab(self._build_sessions_tab(), "训练记录")
         self._tabs.addTab(self._build_mistakes_tab(), "错题本")
         layout.addWidget(self._tabs)
+
+    def set_ui_font_points(self, pt: int) -> None:
+        pt = max(10, min(22, int(pt)))
+        f = QFont(self.font())
+        f.setPointSize(pt)
+        self.setFont(f)
+        self._tabs.setFont(f)
+        self._equity_curve.set_ui_font_points(pt)
 
     # ------------------------------------------------------------------
     # Overview

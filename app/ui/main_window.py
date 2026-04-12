@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -66,6 +66,11 @@ from app.ui.challenge_review_panel import ChallengeReviewPanel
 from app.ui.review_panel import ReviewPanel
 
 _SNAPSHOT_DIR = Path.home() / ".priceaction" / "snapshots"
+
+_UI_FONT_MIN_PT = 10
+_UI_FONT_MAX_PT = 22
+_UI_FONT_DEFAULT_PT = 13
+_UI_FONT_SCALE_REF = 13
 
 
 class _BatchDownloadWorker(QThread):
@@ -357,10 +362,33 @@ class MainWindow(QMainWindow):
         self._refresh_data_table()
         self._review_panel.refresh()
         self._challenge_review_panel.refresh()
+        self._apply_ui_font_pt(self._spn_ui_font.value(), persist=False)
 
     # ==================================================================
     # UI
     # ==================================================================
+
+    def _on_ui_font_spin_changed(self, value: int) -> None:
+        self._apply_ui_font_pt(value, persist=True)
+
+    def _apply_ui_font_pt(self, pt: int, *, persist: bool) -> None:
+        pt = max(_UI_FONT_MIN_PT, min(_UI_FONT_MAX_PT, int(pt)))
+        if persist:
+            QSettings("PriceAction", "Trainer").setValue("ui/font_pt", pt)
+        app = QApplication.instance()
+        if app:
+            f = QFont(app.font())
+            f.setPointSize(pt)
+            app.setFont(f)
+            fam = f.family()
+        else:
+            fam = self.font().family()
+        self.setFont(QFont(fam, pt))
+        snap_px = max(12, round(16 * pt / _UI_FONT_SCALE_REF))
+        self._lbl_snap_title.setStyleSheet(f"color:#d1d4dc;font-size:{snap_px}px;")
+        self._chart.set_ui_font_points(pt)
+        self._review_panel.set_ui_font_points(pt)
+        self._challenge_review_panel.set_ui_font_points(pt)
 
     def _build_ui(self):
         central = QWidget()
@@ -478,6 +506,20 @@ class MainWindow(QMainWindow):
         self._btn_start = QPushButton("开始训练")
         self._btn_start.setStyleSheet("font-weight:bold;")
         row.addWidget(self._btn_start)
+
+        row.addWidget(QLabel("界面字号:"))
+        self._spn_ui_font = QSpinBox()
+        self._spn_ui_font.setRange(_UI_FONT_MIN_PT, _UI_FONT_MAX_PT)
+        self._spn_ui_font.setSingleStep(1)
+        self._spn_ui_font.setSuffix(" pt")
+        self._spn_ui_font.setMinimumWidth(78)
+        self._spn_ui_font.setToolTip("实时调整全应用与图表文字大小；设置会自动保存。")
+        saved_ui = int(
+            QSettings("PriceAction", "Trainer").value("ui/font_pt", _UI_FONT_DEFAULT_PT)
+        )
+        self._spn_ui_font.setValue(max(_UI_FONT_MIN_PT, min(_UI_FONT_MAX_PT, saved_ui)))
+        row.addWidget(self._spn_ui_font)
+
         row.addStretch()
         return row
 
@@ -752,6 +794,7 @@ class MainWindow(QMainWindow):
         self._btn_delete_all.clicked.connect(self._on_delete_all_data)
         self._btn_random_download.clicked.connect(self._on_random_batch_download)
         self._btn_challenge_switch.clicked.connect(self._on_challenge_switch_stock)
+        self._spn_ui_font.valueChanged.connect(self._on_ui_font_spin_changed)
 
         self._btn_next.clicked.connect(lambda: self._advance(1))
         self._btn_next5.clicked.connect(lambda: self._advance(5))

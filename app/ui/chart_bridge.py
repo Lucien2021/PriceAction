@@ -67,6 +67,11 @@ class ChartWidget(QWebEngineView):
         else:
             self._pending_calls.append(js)
 
+    def set_ui_font_points(self, pt: int) -> None:
+        """与主窗口「界面字号」联动：图表内 HTML/CSS 与 Canvas 叠加文字。"""
+        p = max(10, min(24, int(pt)))
+        self._run_js(f"setChartUIFontPts({p})")
+
     # ------------------------------------------------------------------
     # Core data
     # ------------------------------------------------------------------

@@ -92,6 +92,14 @@ class ChallengeReviewPanel(QWidget):
         split.setStretchFactor(1, 3)
         layout.addWidget(split)
 
+    def set_ui_font_points(self, pt: int) -> None:
+        pt = max(10, min(22, int(pt)))
+        fam = self._tree.font().family()
+        self._tree.setFont(QFont(fam, pt))
+        self._table.setFont(QFont(fam, pt))
+        px = max(12, round(15 * pt / 13))
+        self._lbl_summary.setStyleSheet(f"color:#333;font-size:{px}px;padding:4px 2px;")
+
     def refresh(self) -> None:
         self._tree.clear()
         self._group_items.clear()
